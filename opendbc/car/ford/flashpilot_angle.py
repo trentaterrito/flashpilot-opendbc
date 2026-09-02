@@ -52,6 +52,16 @@ _PSCM_DREF_M = (0.5, 0.95, 1.4, 2.075, 2.75, 3.875)
 _GAIN_LOW_HIGH_SPEED = 0.95
 _GAIN_HIGH_HIGH_SPEED = 0.95
 
+# Known-good BluePilot Angle tuning from the physical Lightning. These are the
+# three user adjustment factors applied on top of the platform base gains; they
+# are constants here until FlashPilot grows a dedicated Params/UI surface.
+FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR = 0.98
+FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR = 0.90
+FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR = 0.83
+
+_GAIN_SPEED_BP_MS = (13.5, 26.82)
+_GAIN_CURVATURE_BP = (0.0007, 0.001)
+
 _STEER_DT = CarControllerParams.STEER_STEP * DT_CTRL  # 20 Hz lateral tick
 
 # Human-turn override thresholds, from opendbc/sunnypilot/car/ford/human_turn.py
@@ -79,6 +89,16 @@ def pscm_d_ref_m(v_ego_ms: float) -> float:
   if v > _PSCM_DREF_SPEEDS_MS[-1]:
     d = min(5.0, d)
   return d
+
+
+def path_angle_curvature_factor(v_ego_ms: float, curvature: float) -> float:
+  """BluePilot-equivalent Lightning gain interpolation without its Params/UI layer."""
+  low_gain = float(interp(v_ego_ms, _GAIN_SPEED_BP_MS,
+                          (1.0, _GAIN_LOW_HIGH_SPEED * FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR)))
+  high_gain = float(interp(v_ego_ms, _GAIN_SPEED_BP_MS,
+                           (1.30 * FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR,
+                            _GAIN_HIGH_HIGH_SPEED * FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR)))
+  return float(interp(abs(curvature), _GAIN_CURVATURE_BP, (low_gain, high_gain)))
 
 
 class HumanTurnDetector:
@@ -185,9 +205,7 @@ class FlashPilotAngleController:
       kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
                              current_curvature + CarControllerParams.CURVATURE_ERROR))
 
-    low_gain = float(interp(v_ego, [13.5, 26.82], [1.0, _GAIN_LOW_HIGH_SPEED]))
-    high_gain = float(interp(v_ego, [13.5, 26.82], [1.30, _GAIN_HIGH_HIGH_SPEED]))
-    curvature_factor = float(interp(abs(kappa_cmd), [0.0007, 0.001], [low_gain, high_gain]))
+    curvature_factor = path_angle_curvature_factor(v_ego, kappa_cmd)
 
     d_ref = pscm_d_ref_m(v_ego)  # noqa: F841 -- geometry documented for reference; the
     # gain-table form above (ported from lateral_angle_ext.py) is what's actually applied.

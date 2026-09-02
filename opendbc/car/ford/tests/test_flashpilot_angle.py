@@ -13,10 +13,31 @@ from types import SimpleNamespace
 
 from opendbc.car import Bus, structs
 from opendbc.car.ford.carcontroller import CarController
+from opendbc.car.ford.flashpilot_angle import path_angle_curvature_factor
 from opendbc.car.ford.values import CAR, DBC, FordFlags
 
 FORD_LateralMotionControl2 = 0x3D6
 FORD_Lane_Assist_Data1 = 0x3CA
+
+
+class TestFlashPilotAngleTuning(unittest.TestCase):
+  def test_bluepilot_effective_endpoint_gains(self):
+    self.assertAlmostEqual(path_angle_curvature_factor(13.5, 0.0007), 1.00)
+    self.assertAlmostEqual(path_angle_curvature_factor(13.5, 0.0010), 1.274)
+    self.assertAlmostEqual(path_angle_curvature_factor(26.82, 0.0007), 0.7885)
+    self.assertAlmostEqual(path_angle_curvature_factor(26.82, 0.0010), 0.855)
+
+  def test_bluepilot_representative_interpolation_points(self):
+    # Mid-speed/mid-curvature and quarter/three-quarter points calculated from
+    # BluePilot's same nested linear interpolation.
+    cases = (
+      (20.16, 0.000850, 0.979375),
+      (16.83, 0.000775, 1.00265625),
+      (23.49, 0.000925, 0.93015625),
+    )
+    for speed, curvature, expected in cases:
+      with self.subTest(speed=speed, curvature=curvature):
+        self.assertAlmostEqual(path_angle_curvature_factor(speed, curvature), expected)
 
 
 def _make_controller(fingerprint):
