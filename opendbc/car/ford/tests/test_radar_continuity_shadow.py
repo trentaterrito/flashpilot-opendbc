@@ -37,3 +37,26 @@ def test_discontinuous_reacquisition_splits_identity_in_shadow():
   shadow.update(0.25, 0, 102.2, 0.1, 25.5)
   decision = shadow.update(0.35, 1, 25.0, -8.0, 0.1)
   assert decision.event == "reacquired_new_identity"
+  assert decision.reason == "range_residual"
+  assert decision.range_residual is not None and decision.range_residual > 2.5
+
+
+def test_continuous_reacquisition_reports_residuals():
+  shadow = SteerAssistDropoutShadow()
+  establish(shadow)
+  shadow.update(0.25, 0, 102.2, 0.1, 25.5)
+  decision = shadow.update(0.35, 1, 39.3, -2.1, 0.15)
+  assert decision.event == "reacquired_continuous"
+  assert decision.reason is None
+  assert decision.range_residual is not None
+  assert decision.velocity_residual is not None
+  assert decision.lateral_residual is not None
+
+
+def test_ineligible_reason_is_reported():
+  shadow = SteerAssistDropoutShadow()
+  shadow.update(0.0, 1, 40.0, -2.0, 1.8)
+  shadow.update(0.2, 1, 39.6, -2.0, 1.8)
+  decision = shadow.update(0.25, 0, 102.2, 0.1, 25.5)
+  assert decision.event == "dropout_ineligible"
+  assert decision.reason == "not_centered"

@@ -165,8 +165,10 @@ class RadarInterface(RadarInterfaceBase):
                                             float(msg["CmbbObjRelLong_V_Actl"]),
                                             float(msg["CmbbObjDistLat_L_Actl"]))
       if decision.event is not None:
-        carlog.info("ford_rb5t_dropout_shadow event=%s hold=%s age=%.3f predicted_d_rel=%s",
-                    decision.event, decision.would_hold, decision.dropout_age, decision.predicted_d_rel)
+        carlog.info("ford_rb5t_dropout_shadow event=%s reason=%s hold=%s age=%.3f predicted_d_rel=%s "
+                    "range_residual=%s velocity_residual=%s lateral_residual=%s",
+                    decision.event, decision.reason, decision.would_hold, decision.dropout_age, decision.predicted_d_rel,
+                    decision.range_residual, decision.velocity_residual, decision.lateral_residual)
     if confidence <= 0:
       self.pts.pop(0, None)
       self.v_rel_history.clear()
