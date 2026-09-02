@@ -1,4 +1,5 @@
 import numpy as np
+from collections import deque
 from typing import cast
 from collections import defaultdict
 from math import cos, sin
@@ -7,7 +8,9 @@ from opendbc.can import CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import DBC, RADAR
+from opendbc.car.ford.radar_continuity import SteerAssistDropoutShadow
+from opendbc.car.ford.values import DBC, RADAR, FordFlags
+from opendbc.car.carlog import carlog
 from opendbc.car.interfaces import RadarInterfaceBase
 
 DELPHI_ESR_RADAR_MSGS = list(range(0x500, 0x540))
@@ -19,6 +22,7 @@ DELPHI_MRR_RADAR_MSG_COUNT = 64
 DELPHI_MRR_RADAR_RANGE_COVERAGE = {0: 42, 1: 164, 2: 45, 3: 175}  # scan index to detection range (m)
 DELPHI_MRR_MIN_LONG_RANGE_DIST = 30  # meters
 DELPHI_MRR_CLUSTER_THRESHOLD = 5  # meters, lateral distance and relative velocity are weighted
+STEER_ASSIST_DATA_ADDR = 0x3D7
 
 
 @dataclass
@@ -89,15 +93,22 @@ def _create_delphi_mrr_radar_can_parser(CP) -> CANParser:
   return CANParser(RADAR.DELPHI_MRR, messages, CanBus(CP).radar)
 
 
+def _create_steer_assist_radar_can_parser(CP) -> CANParser:
+  return CANParser(RADAR.STEER_ASSIST_DATA, [("Steer_Assist_Data", 20)], CanBus(CP).camera)
+
+
 class RadarInterface(RadarInterfaceBase):
   def __init__(self, CP):
     super().__init__(CP)
 
     self.points: list[list[float]] = []
     self.clusters: list[Cluster] = []
+    self.v_rel_history = deque(maxlen=20)
+    self.current_time = 0.0
+    self.dropout_shadow = SteerAssistDropoutShadow() if CP.flags & FordFlags.STEER_ASSIST_RADAR_SHADOW else None
 
     self.updated_messages = set()
-    self.radar = DBC[CP.carFingerprint].get(Bus.radar)
+    self.radar = RADAR.STEER_ASSIST_DATA if CP.flags & FordFlags.STEER_ASSIST_RADAR else DBC[CP.carFingerprint].get(Bus.radar)
     self.scan_index_invalid_cnt = 0
     self.radar_unavailable_cnt = 0
     self.prev_headerScanIndex = 0
@@ -110,6 +121,9 @@ class RadarInterface(RadarInterfaceBase):
     elif self.radar == RADAR.DELPHI_MRR:
       self.rcp = _create_delphi_mrr_radar_can_parser(CP)
       self.trigger_msg = DELPHI_MRR_RADAR_HEADER_ADDR
+    elif self.radar == RADAR.STEER_ASSIST_DATA:
+      self.rcp = _create_steer_assist_radar_can_parser(CP)
+      self.trigger_msg = STEER_ASSIST_DATA_ADDR
     else:
       raise ValueError(f"Unsupported radar: {self.radar}")
 
@@ -117,6 +131,8 @@ class RadarInterface(RadarInterfaceBase):
     if self.rcp is None:
       return super().update(None)
 
+    if can_strings:
+      self.current_time = max(packet[0] for packet in can_strings) * 1e-9
     vls = self.rcp.update(can_strings)
     self.updated_messages.update(vls)
 
@@ -134,9 +150,52 @@ class RadarInterface(RadarInterfaceBase):
       _update = self._update_delphi_mrr(ret)
       if not _update:
         return None
+    elif self.radar == RADAR.STEER_ASSIST_DATA:
+      self._update_steer_assist()
 
     ret.points = list(self.pts.values())
     return ret
+
+  def _update_steer_assist(self):
+    msg = self.rcp.vl["Steer_Assist_Data"]
+    confidence = msg["CmbbObjConfdnc_D_Stat"]
+    if self.dropout_shadow is not None:
+      decision = self.dropout_shadow.update(self.current_time, int(confidence),
+                                            float(msg["CmbbObjDistLong_L_Actl"]),
+                                            float(msg["CmbbObjRelLong_V_Actl"]),
+                                            float(msg["CmbbObjDistLat_L_Actl"]))
+      if decision.event is not None:
+        carlog.info("ford_rb5t_dropout_shadow event=%s hold=%s age=%.3f predicted_d_rel=%s",
+                    decision.event, decision.would_hold, decision.dropout_age, decision.predicted_d_rel)
+    if confidence <= 0:
+      self.pts.pop(0, None)
+      self.v_rel_history.clear()
+      return
+
+    d_rel = msg["CmbbObjDistLong_L_Actl"]
+    v_rel = msg["CmbbObjRelLong_V_Actl"]
+    new_track = 0 not in self.pts
+    if new_track:
+      self.pts[0] = structs.RadarData.RadarPoint()
+      self.pts[0].trackId = self.track_id
+      self.track_id += 1
+    elif abs(v_rel) < 1e-2:
+      self.v_rel_history.append(d_rel - self.pts[0].dRel)
+      v_rel = sum(self.v_rel_history)
+    else:
+      self.v_rel_history.clear()
+
+    if not new_track and (abs(self.pts[0].vRel - v_rel) > 2.0 or abs(self.pts[0].dRel - d_rel) > 5.0):
+      self.pts[0].trackId = self.track_id
+      self.track_id += 1
+      self.v_rel_history.clear()
+
+    self.pts[0].dRel = d_rel
+    self.pts[0].yRel = msg["CmbbObjDistLat_L_Actl"]
+    self.pts[0].vRel = v_rel
+    self.pts[0].deprecated.aRel = float('nan')
+    self.pts[0].deprecated.yvRel = msg["CmbbObjRelLat_V_Actl"]
+    self.pts[0].deprecated.measured = True
 
   def _update_delphi_esr(self):
     for ii in sorted(self.updated_messages):

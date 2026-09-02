@@ -47,11 +47,16 @@ class FordSafetyFlags(IntFlag):
 class FordFlags(IntFlag):
   # Static flags
   CANFD = 1
+  # Runtime-only opt-in for the experimental Steer_Assist_Data radar adapter.
+  # This is deliberately not set by any platform config.
+  STEER_ASSIST_RADAR = 2
+  STEER_ASSIST_RADAR_SHADOW = 4
 
 
 class RADAR:
   DELPHI_ESR = 'ford_fusion_2018_adas'
   DELPHI_MRR = 'FORD_CADS'
+  STEER_ASSIST_DATA = 'ford_lincoln_base_pt'
 
 
 class Footnote(Enum):
