@@ -337,7 +337,6 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     fp_shadow_curvature_raw = (int16_t)fp_shadow_raw_u;
     if (ford_sp_gate.enabled) {
       ford_sp_gate.mode_ready = fp_angle_mode_engaged && (action == 0U);
-      ford_sp_gate.mode_ts = microsecond_timer_get();
     }
   }
 
@@ -455,6 +454,8 @@ static safety_config ford_init(uint16_t param) {
     {.msg = {{FORD_EngBrakeData, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{FORD_EngVehicleSpThrottle, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{FORD_DesiredTorqBrk, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    // SunnyPilot's Ford TJA RX registration. Excluded when MADS is OFF.
+    {.msg = {{FORD_Steering_Data_FD1, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
   };
 
   #define FORD_COMMON_TX_MSGS \
@@ -484,7 +485,9 @@ static safety_config ford_init(uint16_t param) {
   };
 
   const uint16_t FORD_PARAM_CANFD = 2;
+  const uint16_t FORD_PARAM_LIGHTNING_MADS = 4;
   const bool ford_canfd = GET_FLAG(param, FORD_PARAM_CANFD);
+  ford_sp_gate.enabled = ford_canfd && GET_FLAG(param, FORD_PARAM_LIGHTNING_MADS);
 
   safety_config ret;
   if (ford_canfd) {
@@ -497,6 +500,9 @@ static safety_config ford_init(uint16_t param) {
 #endif
   } else {
     ret = BUILD_SAFETY_CFG(ford_rx_checks, FORD_LONG_TX_MSGS);
+  }
+  if (!ford_sp_gate.enabled) {
+    ret.rx_checks_len -= 1;
   }
   return ret;
 }

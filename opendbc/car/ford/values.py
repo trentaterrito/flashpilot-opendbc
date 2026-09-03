@@ -42,6 +42,7 @@ class CarControllerParams:
 class FordSafetyFlags(IntFlag):
   LONG_CONTROL = 1
   CANFD = 2
+  LIGHTNING_MADS = 4  # Runtime-only; explicitly selected by FlashPilot card.
 
 
 class FordFlags(IntFlag):

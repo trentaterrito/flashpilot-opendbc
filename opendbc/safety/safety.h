@@ -268,7 +268,14 @@ bool safety_tx_hook(CANPacket_t *msg) {
   }
 
   bool allowed = !relay_malfunction && whitelisted && safety_allowed;
-  if (!allowed) {
+  // A rejected, correctly shaped Ford ACCDATA command is still rejected, but
+  // is not a steering fault. In-flight long requests after braking must not
+  // cancel independently authorized MADS lateral. Other TX failures retain
+  // their existing revocation, including malformed/wrong-bus and steering TX.
+  const bool ford_long_rejection = (current_safety_mode == SAFETY_FORD) && ford_sp_gate.enabled &&
+                                  (msg->addr == FORD_ACCDATA) && (msg->bus == FORD_MAIN_BUS) &&
+                                  (GET_LEN(msg) == 8U) && !relay_malfunction;
+  if (!allowed && !ford_long_rejection) {
     safety_lateral_revoke(LATERAL_REVOKE_TX);
   }
   return allowed;

@@ -1,33 +1,40 @@
 """Actual Ford dispatcher/TX integration around the unmodified sunnypilot core."""
 import pytest
 
-@pytest.mark.parametrize("addr", [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x176, 0x82, 0x3CC, 0x83, 0x7E, 0x430])
+REQUIRED_RX = [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x83, 0x3CC]
+
+@pytest.mark.parametrize("addr", REQUIRED_RX)
 def test_each_missing_required_message_fails_closed(addr):
   h = Harness(omit_address=addr)
   h.button(True)
   assert not h.allowed()
 
 
-@pytest.mark.parametrize("addr", [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x176, 0x82, 0x3CC, 0x83, 0x7E, 0x430])
+@pytest.mark.parametrize("addr", REQUIRED_RX)
 def test_each_required_message_stales_despite_other_fresh_inputs(addr):
   h = Harness()
   h.engage()
   h.omit_address = addr
-  for _ in range(40):
+  for _ in range(120):
     h.now += 10000
     h.safety.set_timer(h.now)
     h.refresh()
+    if h.now % 1000000 == 1000:
+      h.safety.safety_tick_current_safety_config()
+  h.safety.safety_tick_current_safety_config()
   assert not h.allowed()
   h.omit_address = None
   for _ in range(3):
     h.refresh()
+  h.safety.safety_tick_current_safety_config()
   assert not h.allowed()
+  h.refresh()  # fresh host eligibility after native lagging state clears
   h.engage()
 
 
 @pytest.mark.parametrize("source", ["speed", "yaw"])
 @pytest.mark.parametrize("delta", [-1, -2, 2])
-def test_first_duplicate_reordered_or_skipped_counter_revokes(h, source, delta):
+def test_counter_skip_matches_native_tolerance_then_invalidity_revokes(h, source, delta):
   h.engage()
   if source == "speed":
     h.ford.cnt_speed += delta
@@ -35,16 +42,24 @@ def test_first_duplicate_reordered_or_skipped_counter_revokes(h, source, delta):
   else:
     h.ford.cnt_yaw_rate += delta
     bad = h.ford._yaw_rate_msg(0., 15.)
-  h.safety.safety_rx_hook(bad)
-  assert not h.allowed()  # do not wait for upstream's five-error threshold
+  assert h.safety.safety_rx_hook(bad)
+  assert h.allowed()  # native Ford tolerance, not a new first-error veto
+  for _ in range(5):
+    if source == "speed":
+      h.ford.cnt_speed -= 1
+      bad = h.ford._speed_msg(15.)
+    else:
+      h.ford.cnt_yaw_rate -= 1
+      bad = h.ford._yaw_rate_msg(0., 15.)
+    h.safety.safety_rx_hook(bad)
+  assert not h.allowed()
   for _ in range(3):
     h.refresh()
   assert not h.allowed()
   h.engage()
 
 
-@pytest.mark.parametrize("extra", ["PowertrainData_10", "EPAS_INFO", "Lane_Assist_Data3_FD1",
-                                  "SteeringPinion_Data", "Cluster_Info1_FD1"])
+@pytest.mark.parametrize("extra", ["Lane_Assist_Data3_FD1"])
 def test_missing_extra_message_never_grants(extra):
   h = Harness()
   h.safety.test_sp_configure(True)
@@ -56,7 +71,7 @@ def test_missing_extra_message_never_grants(extra):
 
 
 @pytest.mark.parametrize("timeout", [100001, 200000, 1000000])
-def test_late_heartbeat_cannot_resurrect_authorization(h, timeout):
+def test_heartbeat_cannot_resurrect_expired_status(h, timeout):
   h.engage()
   h.now += timeout
   h.safety.set_timer(h.now)
@@ -214,7 +229,7 @@ def test_invalid_can_skips_ford_rx_but_still_revokes(h):
   assert not h.steer()
 
 
-@pytest.mark.parametrize("addr", [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x176, 0x82, 0x3CC, 0x83, 0x7E, 0x430])
+@pytest.mark.parametrize("addr", REQUIRED_RX)
 def test_malformed_required_rx_revokes(h, addr):
   h.engage()
   h.safety.safety_rx_hook(libsafety_py.make_CANPacket(addr, 0, b"\0" * 7))
@@ -224,14 +239,7 @@ def test_malformed_required_rx_revokes(h, addr):
 @pytest.mark.parametrize("msg,fields", [
   *[("EngBrakeData", dict(CcStat_D_Actl=3, BpedDrvAppl_D_Actl=i)) for i in (0, 3)],
   ("EngBrakeData", dict(CcStat_D_Actl=2, BpedDrvAppl_D_Actl=1)),
-  *[("PowertrainData_10", dict(TrnRng_D_Rq=i)) for i in (0,1,2,4,5,14,15)],
-  *[("EPAS_INFO", dict(EPAS_Failure=i, SteMdule_D_Stat=2)) for i in (1,2,3)],
-  ("EPAS_INFO", dict(EPAS_Failure=0, SteMdule_D_Stat=1)),
-  ("EPAS_INFO", dict(EPAS_Failure=0, SteMdule_D_Stat=2, SteeringColumnTorque=1.0625)),
   *[("Lane_Assist_Data3_FD1", dict(LatCtlSte_D_Stat=i)) for i in (0,4,5,6,7)],
-  *[("SteeringPinion_Data", dict(StePinCompAnEst_D_Qf=i)) for i in (0,1,2)],
-  *[("Cluster_Info1_FD1", dict(DrvSlipCtlMde_D_Rq=i)) for i in (1,2,3)],
-  *[("DesiredTorqBrk", dict(VehStop_D_Stat=0, PrkBrkStatus=i)) for i in (0,1,2,3,5,6,7)],
 ])
 def test_vehicle_faults_clear_without_resume(h, msg, fields):
   h.engage()
@@ -261,7 +269,7 @@ def test_held_button_after_fault_does_not_reengage(h):
   assert not h.allowed()  # second deliberate press disengages
 
 
-def test_status_read_does_not_refresh_host_liveness(h):
+def test_status_read_does_not_refresh_status_liveness(h):
   h.engage()
   h.now += 100001
   h.safety.set_timer(h.now)

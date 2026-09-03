@@ -95,13 +95,9 @@ def test_brake_and_regen_notifications_do_not_grant_or_revoke_selected_lateral(r
 
 
 @pytest.mark.parametrize("message,fields", [
-  ("EPAS_INFO", dict(EPAS_Failure=1, SteMdule_D_Stat=2)),
-  ("EPAS_INFO", dict(SteMdule_D_Stat=2, SteeringColumnTorque=1.0625)),
-  ("PowertrainData_10", dict(TrnRng_D_Rq=1)),
   ("Lane_Assist_Data3_FD1", dict(LatCtlSte_D_Stat=4)),
-  ("Cluster_Info1_FD1", dict(DrvSlipCtlMde_D_Rq=1)),
 ])
-def test_vehicle_fault_or_override_while_braking(message, fields):
+def test_local_status_fault_while_braking(message, fields):
   h = BrakeHarness()
   h.engage()
   h.brake(True)

@@ -5,29 +5,19 @@
 // FlashPilot integration boundary, not a replacement MADS state machine.
 // Upstream owns controls_allowed_lateral. This adapter can veto it, feeds only
 // fresh physical TJA intent, and never writes controls_allowed.
-// No production initializer or safetyParam enables this development integration.
-#define FORD_SP_EXTRA_COUNT 6
-#define FORD_SP_MAX_AGE_US 100000U
+// Selected only by the explicit Lightning CAN-FD MADS safety parameter.
+#define FORD_SP_STATUS_MAX_AGE_US 100000U
 
 typedef struct {
   bool enabled;
   bool platform_ready;
-  uint32_t platform_ts;
   bool mode_ready;
-  uint32_t mode_ts;
-  bool extra_seen[FORD_SP_EXTRA_COUNT];
-  uint32_t extra_ts[FORD_SP_EXTRA_COUNT];
-  bool drive;
-  bool eps_ok;
   bool lateral_ok;
   bool lateral_progress_seen;
   unsigned int lateral_counter;
   uint32_t lateral_progress_ts;
-  bool pinion_ok;
-  bool stability_ok;
   bool main_on;
   bool brake_ok;
-  bool motion_ok;
   bool release_seen;
   bool button_prev;
   uint32_t reason;
@@ -47,7 +37,7 @@ static bool ford_sp_status_checksum_valid(const CANPacket_t *msg) {
 
 static bool ford_sp_status_ready(void) {
   return ford_sp_gate.lateral_ok && ford_sp_gate.lateral_progress_seen &&
-         (safety_get_ts_elapsed(microsecond_timer_get(), ford_sp_gate.lateral_progress_ts) <= FORD_SP_MAX_AGE_US);
+         (safety_get_ts_elapsed(microsecond_timer_get(), ford_sp_gate.lateral_progress_ts) <= FORD_SP_STATUS_MAX_AGE_US);
 }
 
 static inline void ford_sp_set_board_check(bool (*check)(void)) {
@@ -84,34 +74,22 @@ static void ford_sp_revoke(lateral_revocation_reason reason) {
 }
 
 static bool ford_sp_vehicle_ready(void) {
-  const uint32_t now = microsecond_timer_get();
   if (ford_sp_board_ready != NULL) {
     ford_sp_gate.platform_ready = ford_sp_gate.platform_ready && ford_sp_board_ready();
   }
   bool valid = ford_sp_gate.platform_ready && ford_sp_gate.mode_ready;
-  valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.platform_ts) <= FORD_SP_MAX_AGE_US);
-  valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.mode_ts) <= FORD_SP_MAX_AGE_US);
   valid = valid && !relay_malfunction && !safety_rx_checks_invalid && !steering_disengage;
-  valid = valid && ford_sp_gate.drive && ford_sp_gate.eps_ok;
   // Repeated counter values do not renew freshness, even if RX continues.
   // This detects a frozen source; a replayed changing sequence is NOT authenticated.
   valid = valid && ford_sp_status_ready();
-  valid = valid && ford_sp_gate.pinion_ok && ford_sp_gate.stability_ok && ford_sp_gate.main_on;
-  valid = valid && ford_sp_gate.brake_ok && ford_sp_gate.motion_ok;
+  valid = valid && ford_sp_gate.main_on && ford_sp_gate.brake_ok;
   valid = valid && (SAFETY_ABS(vehicle_speed.values[0] - vehicle_speed_2.values[0]) <= (2 * VEHICLE_SPEED_FACTOR));
-  for (int i = 0; i < FORD_SP_EXTRA_COUNT; i++) {
-    valid = valid && ford_sp_gate.extra_seen[i] && (safety_get_ts_elapsed(now, ford_sp_gate.extra_ts[i]) <= FORD_SP_MAX_AGE_US);
-  }
   for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
     const RxCheck *check = &current_safety_config.rx_checks[i];
-    const uint32_t frequency = check->msg[check->status.index].frequency;
     valid = valid && check->status.msg_seen && check->status.valid_checksum && check->status.valid_quality_flag;
-    // Independent permission has no bad-counter tolerance. Keep upstream Ford
-    // validation unchanged when MADS is off; revoke on its first counter error.
-    valid = valid && !check->status.lagging && (check->status.wrong_counters == 0) && (frequency >= 10U);
-    if (frequency >= 10U) {
-      valid = valid && (safety_get_ts_elapsed(now, check->status.last_timestamp) <= (3000000U / frequency));
-    }
+    // Match the existing Ford RX validator rather than imposing first-error
+    // or three-period overlays. Its invalid/lag callbacks still revoke locally.
+    valid = valid && !check->status.lagging && (check->status.wrong_counters < MAX_WRONG_COUNTERS);
   }
   return valid;
 }
@@ -128,7 +106,6 @@ static inline void ford_sp_host_heartbeat(uint16_t longitudinal, uint16_t latera
   heartbeat_engaged_mads = (lateral == 1U) && (longitudinal <= 1U) && (length == 0U);
   if (ford_sp_gate.enabled) {
     ford_sp_gate.platform_ready = heartbeat_engaged_mads;
-    ford_sp_gate.platform_ts = microsecond_timer_get();
     ford_sp_check();
   }
   if (!heartbeat_engaged_mads) {
@@ -147,14 +124,9 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
     for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
       required |= msg->addr == (unsigned int)current_safety_config.rx_checks[i].msg[0].addr;
     }
-    const unsigned int addresses[FORD_SP_EXTRA_COUNT] = {0x176U, 0x82U, 0x3CCU, 0x83U, 0x7EU, 0x430U};
-    int extra = -1;
-    for (int i = 0; i < FORD_SP_EXTRA_COUNT; i++) {
-      if (msg->addr == addresses[i]) {
-        required = true;
-        extra = i;
-      }
-    }
+    // Host Ford CANParser/CarState owns gear, EPS, pinion and ESP validity as
+    // in SunnyPilot. No duplicate raw state or unbounded last-known fallback.
+    required |= msg->addr == 0x3CCU;
     const bool lateral_status = (msg->addr == 0x3CCU) && (msg->bus == 0U);
     const bool status_integrity = !lateral_status || ford_sp_status_checksum_valid(msg);
     if (!valid || !status_integrity || (required && (msg->bus == 0U) && (GET_LEN(msg) != 8U))) {
@@ -163,17 +135,6 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
       }
       ford_sp_revoke(LATERAL_REVOKE_INVALID_RX);
     } else if (required && (msg->bus == 0U)) {
-      if (extra >= 0) {
-        ford_sp_gate.extra_seen[extra] = true;
-        ford_sp_gate.extra_ts[extra] = microsecond_timer_get();
-      }
-      if (msg->addr == 0x176U) {
-        ford_sp_gate.drive = (msg->data[3] & 15U) == 3U;
-      }
-      if (msg->addr == 0x82U) {
-        const int torque = (int)msg->data[0] - 128;
-        ford_sp_gate.eps_ok = ((msg->data[1] & 3U) == 0U) && ((msg->data[6] >> 5U) == 2U) && (torque >= -16) && (torque <= 16);
-      }
       if (msg->addr == 0x3CCU) {
         const unsigned int state = msg->data[2] & 7U;
         const unsigned int counter = (msg->data[4] >> 2U) & 15U;
@@ -184,23 +145,12 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
         }
         ford_sp_gate.lateral_ok = (state >= 1U) && (state <= 3U);
       }
-      if (msg->addr == 0x7EU) {
-        ford_sp_gate.pinion_ok = ((msg->data[5] >> 2U) & 3U) == 3U;
-      }
-      if (msg->addr == 0x430U) {
-        ford_sp_gate.stability_ok = (msg->data[4] & 3U) == 0U;
-      }
       if (msg->addr == 0x165U) {
         const unsigned int cruise = msg->data[1] & 7U;
         ford_sp_gate.main_on = (cruise >= 3U) && (cruise <= 5U);
         const unsigned int brake_state = (msg->data[0] >> 4U) & 3U;
         // DBC: 1 = released, 2 = driver braking, 0/3 = not allowed.
         ford_sp_gate.brake_ok = (brake_state == 1U) || (brake_state == 2U);
-      }
-      if (msg->addr == 0x213U) {
-        const unsigned int motion = (msg->data[3] >> 3U) & 3U;
-        ford_sp_gate.motion_ok = ((motion == 0U) || ((motion == 1U) && (vehicle_speed.values[0] <= 300))) &&
-                                  ((msg->data[3] & 7U) == 4U);
       }
       ford_sp_check();
       if ((msg->addr == 0x83U) && ford_sp_vehicle_ready()) {
