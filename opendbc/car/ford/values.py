@@ -51,6 +51,12 @@ class FordFlags(IntFlag):
   # This is deliberately not set by any platform config.
   STEER_ASSIST_RADAR = 2
   STEER_ASSIST_RADAR_SHADOW = 4
+  # Runtime-only opt-in, Lightning only: request the IPMA_Data cluster's
+  # hands-free-style display (LaHandsOff_D_Dsply = 2) while actively steering
+  # and not otherwise alerting. Display/chime only -- see fordcan.py's
+  # create_lkas_ui_msg. Set once by card.py from the FlashPilotFordHandsFreeCluster
+  # Param; not set by any platform config.
+  HANDS_FREE_CLUSTER = 8
 
 
 class RADAR:
