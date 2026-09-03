@@ -170,11 +170,43 @@ def test_independent_lateral_without_longitudinal(h):
     assert h.allowed()
 
 
-def test_main_and_cruise_cannot_autoengage(h):
-  for cruise in (0, 3, 4, 5, 3):
-    h.rx("EngBrakeData", CcStat_D_Actl=cruise, BpedDrvAppl_D_Actl=1)
+def test_set_transition_engages_lateral_but_cancel_does_not_disable_it(h):
+  assert not h.allowed()
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
+  h.rx("EngBrakeData", CcStat_D_Actl=3, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
+
+
+def test_restart_while_cruise_engaged_cannot_autoengage(h):
+  h.safety.set_safety_hooks(CarParams.SafetyModel.ford, 6)
+  h.safety.test_sp_configure(True)
+  h.safety.test_sp_platform(True)
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert not h.allowed()
+
+
+def test_fault_while_cruise_remains_engaged_cannot_auto_reengage(h):
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
+  h.safety.safety_lateral_revoke(2)
+  assert not h.allowed()
+  for _ in range(3):
+    h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
     assert not h.allowed()
-  assert not h.steer()
+
+
+def test_cruise_master_off_revokes_both_and_requires_new_set(h):
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
+  h.rx("EngBrakeData", CcStat_D_Actl=0, BpedDrvAppl_D_Actl=1)
+  assert not h.allowed()
+  h.refresh()
+  assert not h.allowed()
+  h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert h.allowed()
 
 
 @pytest.mark.parametrize("host_packet", [(0, 0, 0), (1, 0, 0), (2, 1, 0), (65535, 1, 0),
@@ -202,7 +234,7 @@ def test_valid_heartbeat_is_only_eligibility(h, longitudinal):
 
 
 @pytest.mark.parametrize("reason", [r for r in range(1, 15) if r not in (4, 5)])
-def test_every_shared_revocation_clears_and_requires_new_intent(h, reason):
+def test_every_shared_revocation_clears_and_requires_new_physical_intent(h, reason):
   h.engage()
   h.safety.safety_lateral_revoke(reason)
   assert not h.allowed()
@@ -211,11 +243,10 @@ def test_every_shared_revocation_clears_and_requires_new_intent(h, reason):
   else:
     h.refresh()
     assert not h.allowed()
+    # A new physical SET transition is a valid fresh lateral request.
     h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
-    assert not h.allowed()
-    assert not h.steer()
-    h.refresh()
-    h.engage()
+    assert h.allowed()
+    assert h.steer()
 
 
 def test_invalid_can_skips_ford_rx_but_still_revokes(h):

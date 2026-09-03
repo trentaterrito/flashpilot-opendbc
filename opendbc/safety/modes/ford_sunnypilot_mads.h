@@ -17,6 +17,8 @@ typedef struct {
   unsigned int lateral_counter;
   uint32_t lateral_progress_ts;
   bool main_on;
+  bool cruise_engaged_prev;
+  bool cruise_release_seen;
   bool brake_ok;
   bool release_seen;
   bool button_prev;
@@ -118,6 +120,21 @@ static bool ford_sp_lateral_allowed(void) {
   return ford_sp_gate.enabled ? controls_allowed_lateral : controls_allowed;
 }
 
+static void ford_sp_physical_request(bool toggle) {
+  if (controls_allowed_lateral) {
+    if (toggle) {
+      ford_sp_revoke(LATERAL_REVOKE_BUTTON);
+    }
+  } else {
+    ford_sp_reset_upstream(true);
+    mads_button_press = MADS_BUTTON_NOT_PRESSED;
+    mads_state_update(vehicle_moving, false, false, false, false);
+    mads_button_press = MADS_BUTTON_PRESSED;
+    mads_state_update(vehicle_moving, false, false, false, false);
+    ford_sp_gate.reason = 0U;
+  }
+}
+
 static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
   if (ford_sp_gate.enabled) {
     bool required = false;
@@ -148,26 +165,28 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
       if (msg->addr == 0x165U) {
         const unsigned int cruise = msg->data[1] & 7U;
         ford_sp_gate.main_on = (cruise >= 3U) && (cruise <= 5U);
+        const bool cruise_engaged = (cruise == 4U) || (cruise == 5U);
+        const bool cruise_rising = cruise_engaged && !ford_sp_gate.cruise_engaged_prev;
         const unsigned int brake_state = (msg->data[0] >> 4U) & 3U;
         // DBC: 1 = released, 2 = driver braking, 0/3 = not allowed.
         ford_sp_gate.brake_ok = (brake_state == 1U) || (brake_state == 2U);
+        if (!cruise_engaged && ford_sp_gate.main_on) {
+          ford_sp_gate.cruise_release_seen = true;
+        }
+        // SET/RESUME is represented by Ford's transition from ACC-main ready
+        // (state 3) to engaged (4/5). It may grant lateral, but never toggles
+        // an already-active lateral session off. Requiring state 3 first
+        // prevents a panda restart during active cruise from auto-engaging.
+        if (cruise_rising && ford_sp_gate.cruise_release_seen && ford_sp_vehicle_ready()) {
+          ford_sp_physical_request(false);
+        }
+        ford_sp_gate.cruise_engaged_prev = cruise_engaged;
       }
       ford_sp_check();
       if ((msg->addr == 0x83U) && ford_sp_vehicle_ready()) {
         const bool pressed = (msg->data[5] & 1U) != 0U;
         if (pressed && !ford_sp_gate.button_prev && ford_sp_gate.release_seen) {
-          if (controls_allowed_lateral) {
-            ford_sp_revoke(LATERAL_REVOKE_BUTTON);
-          } else {
-            ford_sp_reset_upstream(true);
-            // Preserve sunnypilot's button-driven state machine. Main/PCM are
-            // eligibility inputs, NOT permission-grant edges after a revocation.
-            mads_button_press = MADS_BUTTON_NOT_PRESSED;
-            mads_state_update(vehicle_moving, false, false, false, false);
-            mads_button_press = MADS_BUTTON_PRESSED;
-            mads_state_update(vehicle_moving, false, false, false, false);
-            ford_sp_gate.reason = 0U;
-          }
+          ford_sp_physical_request(true);
         }
         if (!pressed) {
           ford_sp_gate.release_seen = true;
