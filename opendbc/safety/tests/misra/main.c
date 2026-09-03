@@ -12,3 +12,7 @@ SAFETY_UNUSED(safety_tx_hook);
 SAFETY_UNUSED(safety_fwd_hook);
 SAFETY_UNUSED(safety_tick);
 SAFETY_UNUSED(set_safety_hooks);
+SAFETY_UNUSED(safety_lateral_revoke);
+  SAFETY_UNUSED(ford_sp_set_board_check);
+  SAFETY_UNUSED(ford_sp_host_heartbeat);
+SAFETY_UNUSED(mads_heartbeat_engaged_check);

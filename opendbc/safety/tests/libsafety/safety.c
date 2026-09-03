@@ -13,6 +13,38 @@ uint32_t microsecond_timer_get(void) {
 #include "opendbc/safety/safety.h"
 #include "opendbc/safety/ignition.h"
 
+// Development harness only: there is no runtime initializer for this port yet.
+static bool test_sp_board_ready(void) {
+  return heartbeat_engaged_mads;
+}
+
+void test_sp_configure(bool lightning) {
+  ford_sp_gate = (FordSunnyMadsGate){0};
+  ford_sp_reset_upstream(false);
+  ford_sp_set_board_check(test_sp_board_ready);
+  ford_sp_gate.enabled = lightning && (current_safety_mode == SAFETY_FORD) && ((current_safety_param & 2U) != 0U);
+}
+
+void test_sp_platform(bool eligible) {
+  heartbeat_engaged_mads = eligible;
+  ford_sp_gate.platform_ready = eligible;
+  ford_sp_gate.platform_ts = microsecond_timer_get();
+  if (!eligible) {
+    ford_sp_revoke(LATERAL_REVOKE_PLATFORM);
+  }
+}
+
+bool test_sp_authorized(void) {
+  ford_sp_check();
+  return controls_allowed_lateral;
+}
+
+bool test_sp_enabled(void) { return ford_sp_gate.enabled; }
+uint32_t test_sp_reason(void) { return ford_sp_gate.reason; }
+void test_sp_heartbeat(uint16_t longitudinal, uint16_t lateral, uint16_t length) {
+  ford_sp_host_heartbeat(longitudinal, lateral, length);
+}
+
 void safety_tick_current_safety_config() {
   safety_tick(&current_safety_config);
 }

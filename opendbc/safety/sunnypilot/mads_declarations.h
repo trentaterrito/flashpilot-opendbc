@@ -103,7 +103,7 @@ extern void mads_set_system_state(bool enabled, bool disengage_lateral_on_brake,
 extern void mads_set_alternative_experience(const int *mode);
 extern void mads_state_update(bool op_vehicle_moving, bool op_acc_main, bool op_allowed, bool is_braking, bool steering_disengage);
 extern void mads_exit_controls(DisengageReason reason);
-extern void mads_heartbeat_engaged_check(void);
+static inline void mads_heartbeat_engaged_check(void);
 
 // ===============================
 // Inline Function Implementations, must be included in the header file to comply with MISRA-C:2012 Rule 8.10
