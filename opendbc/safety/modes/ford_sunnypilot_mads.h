@@ -20,6 +20,9 @@ typedef struct {
   bool drive;
   bool eps_ok;
   bool lateral_ok;
+  bool lateral_progress_seen;
+  unsigned int lateral_counter;
+  uint32_t lateral_progress_ts;
   bool pinion_ok;
   bool stability_ok;
   bool main_on;
@@ -32,6 +35,20 @@ typedef struct {
 
 static FordSunnyMadsGate ford_sp_gate;
 static bool (*ford_sp_board_ready)(void) = NULL;
+
+static bool ford_sp_status_checksum_valid(const CANPacket_t *msg) {
+  // Measured 0x3CC status-group checksum, not full-frame authentication.
+  const unsigned int state = msg->data[2] & 7U;
+  const unsigned int limit = msg->data[4] & 3U;
+  const unsigned int capability = msg->data[4] >> 6U;
+  const unsigned int counter = (msg->data[4] >> 2U) & 15U;
+  return (GET_LEN(msg) == 8U) && (msg->data[5] == (255U - state - limit - capability - counter));
+}
+
+static bool ford_sp_status_ready(void) {
+  return ford_sp_gate.lateral_ok && ford_sp_gate.lateral_progress_seen &&
+         (safety_get_ts_elapsed(microsecond_timer_get(), ford_sp_gate.lateral_progress_ts) <= FORD_SP_MAX_AGE_US);
+}
 
 static inline void ford_sp_set_board_check(bool (*check)(void)) {
   ford_sp_board_ready = check;
@@ -72,7 +89,10 @@ static bool ford_sp_vehicle_ready(void) {
   valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.platform_ts) <= FORD_SP_MAX_AGE_US);
   valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.mode_ts) <= FORD_SP_MAX_AGE_US);
   valid = valid && !relay_malfunction && !safety_rx_checks_invalid && !brake_pressed && !regen_braking && !steering_disengage;
-  valid = valid && ford_sp_gate.drive && ford_sp_gate.eps_ok && ford_sp_gate.lateral_ok;
+  valid = valid && ford_sp_gate.drive && ford_sp_gate.eps_ok;
+  // Repeated counter values do not renew freshness, even if RX continues.
+  // This detects a frozen source; a replayed changing sequence is NOT authenticated.
+  valid = valid && ford_sp_status_ready();
   valid = valid && ford_sp_gate.pinion_ok && ford_sp_gate.stability_ok && ford_sp_gate.main_on;
   valid = valid && ford_sp_gate.brake_ok && ford_sp_gate.motion_ok;
   valid = valid && (SAFETY_ABS(vehicle_speed.values[0] - vehicle_speed_2.values[0]) <= (2 * VEHICLE_SPEED_FACTOR));
@@ -132,7 +152,12 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
         extra = i;
       }
     }
-    if (!valid || (required && (msg->bus == 0U) && (GET_LEN(msg) != 8U))) {
+    const bool lateral_status = (msg->addr == 0x3CCU) && (msg->bus == 0U);
+    const bool status_integrity = !lateral_status || ford_sp_status_checksum_valid(msg);
+    if (!valid || !status_integrity || (required && (msg->bus == 0U) && (GET_LEN(msg) != 8U))) {
+      if (lateral_status) {
+        ford_sp_gate.lateral_ok = false;
+      }
       ford_sp_revoke(LATERAL_REVOKE_INVALID_RX);
     } else if (required && (msg->bus == 0U)) {
       if (extra >= 0) {
@@ -148,6 +173,12 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
       }
       if (msg->addr == 0x3CCU) {
         const unsigned int state = msg->data[2] & 7U;
+        const unsigned int counter = (msg->data[4] >> 2U) & 15U;
+        if (!ford_sp_gate.lateral_progress_seen || (counter != ford_sp_gate.lateral_counter)) {
+          ford_sp_gate.lateral_progress_seen = true;
+          ford_sp_gate.lateral_counter = counter;
+          ford_sp_gate.lateral_progress_ts = microsecond_timer_get();
+        }
         ford_sp_gate.lateral_ok = (state >= 1U) && (state <= 3U);
       }
       if (msg->addr == 0x7EU) {

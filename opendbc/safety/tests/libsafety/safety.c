@@ -42,6 +42,8 @@ bool test_sp_authorized(void) {
 bool test_sp_enabled(void) { return ford_sp_gate.enabled; }
 uint32_t test_sp_reason(void) { return ford_sp_gate.reason; }
 bool test_sp_ready(void) { return ford_sp_vehicle_ready(); }
+bool test_sp_status_checksum(const CANPacket_t *msg) { return ford_sp_status_checksum_valid(msg); }
+bool test_sp_status_ready(void) { return ford_sp_status_ready(); }
 void test_sp_heartbeat(uint16_t longitudinal, uint16_t lateral, uint16_t length) {
   ford_sp_host_heartbeat(longitudinal, lateral, length);
 }

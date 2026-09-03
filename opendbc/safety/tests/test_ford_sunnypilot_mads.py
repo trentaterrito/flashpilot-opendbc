@@ -84,6 +84,7 @@ class Harness:
     self.ford.setUp()
     self.safety = self.ford.safety
     self.omit_address = omit_address
+    self.lateral_counter = 0
     original_rx = self.ford._rx
     self.ford._rx = lambda msg: True if msg.addr == self.omit_address else original_rx(msg)
     self.now = 1000
@@ -92,6 +93,13 @@ class Harness:
     self.refresh()
 
   def rx(self, name, **values):
+    if name == "Lane_Assist_Data3_FD1":
+      # Synthetic moving counter for general lifecycle tests; production does
+      # not require this +1 sequence. Raw-capture tests use recorded counters.
+      values.setdefault("LatCtlCpbltyDStat_No_Cnt", self.lateral_counter)
+      self.lateral_counter = (self.lateral_counter + 1) % 16
+      values.setdefault("LatCtlCpbltyDStat_No_Cs", 255 - sum(values.get(field, 0) for field in
+                        ("LatCtlSte_D_Stat", "LatCtlLim_D_Stat", "LatCtlCpblty_D_Stat", "LatCtlCpbltyDStat_No_Cnt")))
     msg = self.ford.packer.make_can_msg_safety(name, 0, values)
     return True if msg.addr == self.omit_address else self.safety.safety_rx_hook(msg)
 
