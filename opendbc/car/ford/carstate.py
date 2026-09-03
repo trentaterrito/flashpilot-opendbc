@@ -8,6 +8,12 @@ from opendbc.car.interfaces import CarStateBase
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
+BSM_FRESHNESS_NS = 400_000_000
+
+
+def read_bsm_state(cp, message: str, signal: str) -> tuple[bool, bool]:
+  value = cp.vl[message][signal]
+  return value != 0, cp.message_fresh(message, BSM_FRESHNESS_NS)
 
 
 class CarState(CarStateBase):
@@ -98,8 +104,8 @@ class CarState(CarStateBase):
     # blindspot sensors
     if self.CP.enableBsm:
       cp_bsm = cp_cam if self.CP.flags & FordFlags.CANFD else cp
-      ret.leftBlindspot = cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
-      ret.rightBlindspot = cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
+      ret.leftBlindspot, ret.leftBlindspotValid = read_bsm_state(cp_bsm, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+      ret.rightBlindspot, ret.rightBlindspotValid = read_bsm_state(cp_bsm, "Side_Detect_R_Stat", "SodDetctRight_D_Stat")
 
     # Stock steering buttons so that we can passthru blinkers etc.
     self.buttons_stock_values = cp.vl["Steering_Data_FD1"]

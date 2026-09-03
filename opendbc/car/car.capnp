@@ -225,6 +225,8 @@ struct CarState {
   # blindspot sensors
   leftBlindspot @33 :Bool;  # Is there something blocking the left lane change
   rightBlindspot @34 :Bool; # Is there something blocking the right lane change
+  leftBlindspotValid @62 :Bool;  # requested-side source is present and fresh
+  rightBlindspotValid @63 :Bool;
 
   fuelGauge @41 :Float32; # battery or fuel tank level from [0.0, 1.0]
   charging @43 :Bool;

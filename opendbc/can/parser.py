@@ -213,6 +213,22 @@ class CANParser:
     self.can_invalid_cnt = 0 if valid else min(self.can_invalid_cnt + 1, CAN_INVALID_CNT)
     return self.can_invalid_cnt < CAN_INVALID_CNT and counters_valid
 
+  def message_fresh(self, name_or_addr: str | int, max_age_nanos: int) -> bool:
+    """Whether a parsed message has a recent successfully decoded sample."""
+    if max_age_nanos < 0:
+      return False
+    if isinstance(name_or_addr, numbers.Number):
+      msg = self.dbc.addr_to_msg.get(int(name_or_addr))
+    else:
+      msg = self.dbc.name_to_msg.get(name_or_addr)
+    if msg is None or msg.address not in self.message_states:
+      return False
+    timestamps = self.message_states[msg.address].timestamps
+    if not timestamps:
+      return False
+    age = self._last_update_nanos - timestamps[-1]
+    return 0 <= age <= max_age_nanos
+
   def update(self, strings, sendcan: bool = False):
     if strings and not isinstance(strings[0], list | tuple):
       strings = [strings]
