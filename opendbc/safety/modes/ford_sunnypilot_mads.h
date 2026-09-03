@@ -83,7 +83,9 @@ static bool ford_sp_vehicle_ready(void) {
     const RxCheck *check = &current_safety_config.rx_checks[i];
     const uint32_t frequency = check->msg[check->status.index].frequency;
     valid = valid && check->status.msg_seen && check->status.valid_checksum && check->status.valid_quality_flag;
-    valid = valid && !check->status.lagging && (check->status.wrong_counters < MAX_WRONG_COUNTERS) && (frequency >= 10U);
+    // Independent permission has no bad-counter tolerance. Keep upstream Ford
+    // validation unchanged when MADS is off; revoke on its first counter error.
+    valid = valid && !check->status.lagging && (check->status.wrong_counters == 0) && (frequency >= 10U);
     if (frequency >= 10U) {
       valid = valid && (safety_get_ts_elapsed(now, check->status.last_timestamp) <= (3000000U / frequency));
     }

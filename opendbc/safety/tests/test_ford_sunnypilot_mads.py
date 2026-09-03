@@ -1,23 +1,99 @@
 """Actual Ford dispatcher/TX integration around the unmodified sunnypilot core."""
 import pytest
 
+@pytest.mark.parametrize("addr", [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x176, 0x82, 0x3CC, 0x83, 0x7E, 0x430])
+def test_each_missing_required_message_fails_closed(addr):
+  h = Harness(omit_address=addr)
+  h.button(True)
+  assert not h.allowed()
+
+
+@pytest.mark.parametrize("addr", [0x415, 0x202, 0x91, 0x165, 0x204, 0x213, 0x176, 0x82, 0x3CC, 0x83, 0x7E, 0x430])
+def test_each_required_message_stales_despite_other_fresh_inputs(addr):
+  h = Harness()
+  h.engage()
+  h.omit_address = addr
+  for _ in range(40):
+    h.now += 10000
+    h.safety.set_timer(h.now)
+    h.refresh()
+  assert not h.allowed()
+  h.omit_address = None
+  for _ in range(3):
+    h.refresh()
+  assert not h.allowed()
+  h.engage()
+
+
+@pytest.mark.parametrize("source", ["speed", "yaw"])
+@pytest.mark.parametrize("delta", [-1, -2, 2])
+def test_first_duplicate_reordered_or_skipped_counter_revokes(h, source, delta):
+  h.engage()
+  if source == "speed":
+    h.ford.cnt_speed += delta
+    bad = h.ford._speed_msg(15.)
+  else:
+    h.ford.cnt_yaw_rate += delta
+    bad = h.ford._yaw_rate_msg(0., 15.)
+  h.safety.safety_rx_hook(bad)
+  assert not h.allowed()  # do not wait for upstream's five-error threshold
+  for _ in range(3):
+    h.refresh()
+  assert not h.allowed()
+  h.engage()
+
+
+@pytest.mark.parametrize("extra", ["PowertrainData_10", "EPAS_INFO", "Lane_Assist_Data3_FD1",
+                                  "SteeringPinion_Data", "Cluster_Info1_FD1"])
+def test_missing_extra_message_never_grants(extra):
+  h = Harness()
+  h.safety.test_sp_configure(True)
+  original_rx = h.rx
+  h.rx = lambda name, **values: True if name == extra else original_rx(name, **values)
+  h.refresh()
+  h.button(True)
+  assert not h.allowed()
+
+
+@pytest.mark.parametrize("timeout", [100001, 200000, 1000000])
+def test_late_heartbeat_cannot_resurrect_authorization(h, timeout):
+  h.engage()
+  h.now += timeout
+  h.safety.set_timer(h.now)
+  h.safety.test_sp_heartbeat(0, 1, 0)
+  assert not h.allowed()
+  h.refresh()
+  h.button(True)
+  assert h.allowed()  # refresh observed release; physical edge is still required
+
+
+def test_duplicate_current_heartbeat_is_not_new_intent(h):
+  for _ in range(10):
+    h.safety.test_sp_heartbeat(0, 1, 0)
+  assert not h.allowed()
+
+
 from opendbc.car.structs import CarParams
 from opendbc.safety.tests import test_flashpilot_ford_safety as angle
 from opendbc.safety.tests.libsafety import libsafety_py
 
 
 class Harness:
-  def __init__(self, lightning=True):
+  def __init__(self, lightning=True, omit_address=None):
     self.ford = angle.TestFlashPilotFordPathAngleSafety()
     self.ford.setUp()
     self.safety = self.ford.safety
+    self.omit_address = omit_address
+    original_rx = self.ford._rx
+    self.ford._rx = lambda msg: True if msg.addr == self.omit_address else original_rx(msg)
     self.now = 1000
     self.safety.set_timer(self.now)
     self.safety.test_sp_configure(lightning)
     self.refresh()
 
   def rx(self, name, **values):
-    return self.safety.safety_rx_hook(self.ford.packer.make_can_msg_safety(name, 0, values))
+    msg = self.ford.packer.make_can_msg_safety(name, 0, values)
+    return True if msg.addr == self.omit_address else self.safety.safety_rx_hook(msg)
 
   def refresh(self):
     self.safety.test_sp_platform(True)
