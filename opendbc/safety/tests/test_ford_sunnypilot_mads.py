@@ -186,7 +186,7 @@ def test_valid_heartbeat_is_only_eligibility(h, longitudinal):
   assert h.allowed()
 
 
-@pytest.mark.parametrize("reason", range(1, 15))
+@pytest.mark.parametrize("reason", [r for r in range(1, 15) if r not in (4, 5)])
 def test_every_shared_revocation_clears_and_requires_new_intent(h, reason):
   h.engage()
   h.safety.safety_lateral_revoke(reason)
@@ -222,7 +222,7 @@ def test_malformed_required_rx_revokes(h, addr):
 
 
 @pytest.mark.parametrize("msg,fields", [
-  ("EngBrakeData", dict(CcStat_D_Actl=3, BpedDrvAppl_D_Actl=2)),
+  *[("EngBrakeData", dict(CcStat_D_Actl=3, BpedDrvAppl_D_Actl=i)) for i in (0, 3)],
   ("EngBrakeData", dict(CcStat_D_Actl=2, BpedDrvAppl_D_Actl=1)),
   *[("PowertrainData_10", dict(TrnRng_D_Rq=i)) for i in (0,1,2,4,5,14,15)],
   *[("EPAS_INFO", dict(EPAS_Failure=i, SteMdule_D_Stat=2)) for i in (1,2,3)],

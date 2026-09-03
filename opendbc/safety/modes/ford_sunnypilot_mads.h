@@ -65,11 +65,14 @@ static void ford_sp_reset_upstream(bool enabled) {
     heartbeat_engaged_mads = false;
   }
   heartbeat_engaged_mads_mismatches = 0U;
-  mads_set_system_state(enabled, true, false);  // Brake DISENGAGE, never auto-resume.
+  mads_set_system_state(enabled, false, false);  // SunnyPilot REMAIN_ACTIVE; no pause/resume.
 }
 
 static void ford_sp_revoke(lateral_revocation_reason reason) {
-  if (ford_sp_gate.enabled) {
+  // Generic safety already cancels ordinary longitudinal permission on brake /
+  // regen. Only selected Lightning MADS retains independent lateral permission;
+  // all non-brake reasons still take the immediate revocation path below.
+  if (ford_sp_gate.enabled && (reason != LATERAL_REVOKE_BRAKE) && (reason != LATERAL_REVOKE_REGEN)) {
     ford_sp_reset_upstream(false);
     ford_sp_gate.release_seen = false;
     ford_sp_gate.button_prev = false;
@@ -88,7 +91,7 @@ static bool ford_sp_vehicle_ready(void) {
   bool valid = ford_sp_gate.platform_ready && ford_sp_gate.mode_ready;
   valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.platform_ts) <= FORD_SP_MAX_AGE_US);
   valid = valid && (safety_get_ts_elapsed(now, ford_sp_gate.mode_ts) <= FORD_SP_MAX_AGE_US);
-  valid = valid && !relay_malfunction && !safety_rx_checks_invalid && !brake_pressed && !regen_braking && !steering_disengage;
+  valid = valid && !relay_malfunction && !safety_rx_checks_invalid && !steering_disengage;
   valid = valid && ford_sp_gate.drive && ford_sp_gate.eps_ok;
   // Repeated counter values do not renew freshness, even if RX continues.
   // This detects a frozen source; a replayed changing sequence is NOT authenticated.
@@ -190,7 +193,9 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
       if (msg->addr == 0x165U) {
         const unsigned int cruise = msg->data[1] & 7U;
         ford_sp_gate.main_on = (cruise >= 3U) && (cruise <= 5U);
-        ford_sp_gate.brake_ok = ((msg->data[0] >> 4U) & 3U) == 1U;
+        const unsigned int brake_state = (msg->data[0] >> 4U) & 3U;
+        // DBC: 1 = released, 2 = driver braking, 0/3 = not allowed.
+        ford_sp_gate.brake_ok = (brake_state == 1U) || (brake_state == 2U);
       }
       if (msg->addr == 0x213U) {
         const unsigned int motion = (msg->data[3] >> 3U) & 3U;
