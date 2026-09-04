@@ -254,7 +254,7 @@ def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw
 
 
 def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_alert: bool, hud_control,
-                       stock_values: dict):
+                       stock_values: dict, hands_free_cluster: bool = False):
   """
   Creates a CAN message for the Ford IPC IPMA/LKAS status.
 
@@ -263,6 +263,14 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
   Stock functionality is maintained by passing through unmodified signals.
 
   Frequency is 1Hz.
+
+  FlashPilot: hands_free_cluster is a Lightning-only, default-off option (see
+  CarController) that requests LaHandsOff_D_Dsply's Level2 ("hands-free" cluster
+  display + chime) while actively steering and not otherwise alerting. Display
+  only -- independent of steering authorization, engagement, and the PSCM's own
+  real hands-sensor signal (LaHandsOff_B_Actl on Lane_Assist_Data3_FD1), which
+  this does not read or affect. See
+  docs/flashpilot/FLASHPILOT_UI_FORD_HANDS_FREE_CLUSTER_AUDIT.md.
   """
 
   # LaActvStats_D_Dsply
@@ -295,7 +303,12 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
     else:
       lines = 30  # LA_Off
 
-  hands_on_wheel_dsply = 1 if steer_alert else 0
+  if steer_alert:
+    hands_on_wheel_dsply = 1                                # unchanged: steering alert always takes precedence
+  elif hands_free_cluster and enabled:
+    hands_on_wheel_dsply = 2                                # FlashPilot: Lightning-only hands-free display + chime
+  else:
+    hands_on_wheel_dsply = 0                                # unchanged
 
   values = {s: stock_values[s] for s in [
     "FeatConfigIpmaActl",

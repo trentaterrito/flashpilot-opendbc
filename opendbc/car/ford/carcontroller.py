@@ -67,6 +67,17 @@ class CarController(CarControllerBase):
     self._fp_angle_mode_engaged = self.flashpilot_angle is not None
     self._fp_shadow_curvature = 0.0
 
+    # FlashPilot: optional Lightning-only Ford cluster hands-free display request
+    # (IPMA_Data/LaHandsOff_D_Dsply = 2 while actively steering) -- display + chime
+    # only, independent of steering authorization/engagement. CP.flags is set once
+    # by card.py from the FlashPilotFordHandsFreeCluster Param (see
+    # FordFlags.HANDS_FREE_CLUSTER); re-checking the fingerprint here too is
+    # deliberate defense-in-depth on top of that gate, matching this class's own
+    # _flashpilot_angle_enabled gating shape above. See
+    # docs/flashpilot/FLASHPILOT_UI_FORD_HANDS_FREE_CLUSTER_AUDIT.md.
+    self._ford_hands_free_cluster = (CP.carFingerprint == CAR.FORD_F_150_LIGHTNING_MK1 and
+                                     bool(CP.flags & FordFlags.HANDS_FREE_CLUSTER))
+
   def update(self, CC, CS, now_nanos):
     can_sends = []
 
@@ -194,7 +205,8 @@ class CarController(CarControllerBase):
     send_ui = (self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or (self.steer_alert_last != steer_alert)
     # send lkas ui msg at 1Hz or if ui state changes
     if (self.frame % CarControllerParams.LKAS_UI_STEP) == 0 or send_ui:
-      can_sends.append(fordcan.create_lkas_ui_msg(self.packer, self.CAN, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values))
+      can_sends.append(fordcan.create_lkas_ui_msg(self.packer, self.CAN, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values,
+                                                  hands_free_cluster=self._ford_hands_free_cluster))
 
     # send acc ui msg at 5Hz or if ui state changes
     if hud_control.leadDistanceBars != self.lead_distance_bars_last:
