@@ -56,7 +56,7 @@ def test_brake_retains_lateral_cancels_long_and_release_does_not_resume(long_on,
   assert h.safety.get_controls_allowed()
 
 
-def test_repeated_brakes_and_tja_disable_while_braking():
+def test_repeated_brakes_and_tja_are_non_authoritative_while_braking():
   h = BrakeHarness()
   h.engage()
   for _ in range(8):
@@ -68,9 +68,9 @@ def test_repeated_brakes_and_tja_disable_while_braking():
   h.brake(True)
   h.button(False)
   h.button(True)
-  assert not h.allowed()
+  assert h.allowed()
   h.brake(False)
-  assert not h.allowed()  # brake release cannot re-engage lateral either
+  assert h.allowed()
 
 
 @pytest.mark.parametrize("reason", [r for r in range(1, 15) if r not in (4, 5)])
@@ -87,6 +87,7 @@ def test_every_non_brake_revocation_still_clears_while_braking(reason):
 @pytest.mark.parametrize("reason", [4, 5])
 def test_brake_and_regen_notifications_do_not_grant_or_revoke_selected_lateral(reason):
   h = BrakeHarness()
+  h.safety.test_sp_heartbeat(0, 0, 0)
   h.safety.safety_lateral_revoke(reason)
   assert not h.allowed()
   h.engage()
