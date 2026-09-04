@@ -3,8 +3,8 @@
 #include "opendbc/safety/sunnypilot/mads.h"
 
 // FlashPilot integration boundary for Always-On Lateral, reusing the existing
-// independent-lateral transport. Upstream owns controls_allowed_lateral; this
-// adapter gates it on fresh host and vehicle evidence and never writes
+// independent-lateral transport. The adapter grants controls_allowed_lateral
+// directly from fresh host and vehicle evidence and never writes
 // controls_allowed. The safety flag name remains legacy wire compatibility.
 #define FORD_SP_STATUS_MAX_AGE_US 100000U
 
@@ -130,11 +130,11 @@ static bool ford_sp_lateral_allowed(void) {
 
 static void ford_sp_authorize_if_ready(void) {
   if (ford_sp_gate.enabled && !controls_allowed_lateral && ford_sp_vehicle_ready()) {
-    ford_sp_reset_upstream(true);
-    mads_button_press = MADS_BUTTON_NOT_PRESSED;
-    mads_state_update(vehicle_moving, false, false, false, false);
-    mads_button_press = MADS_BUTTON_PRESSED;
-    mads_state_update(vehicle_moving, false, false, false, false);
+    // StarPilot's Ford AOL is an ACC-main permission independent of ordinary
+    // controls_allowed. Apply that directly, retaining FlashPilot's platform,
+    // host acknowledgement and vehicle vetoes in ford_sp_vehicle_ready().
+    // No artificial button edge or MADS engagement state machine is needed.
+    controls_allowed_lateral = true;
     ford_sp_gate.host_clear_seen = false;
     ford_sp_gate.reason = 0U;
   }
