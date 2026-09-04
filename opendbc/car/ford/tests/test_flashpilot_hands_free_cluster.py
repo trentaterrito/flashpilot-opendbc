@@ -109,6 +109,24 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
     sends = _run(cc, lat_active=True, steer_alert=False)
     self.assertEqual(self._hands_off_value(sends, cc), 2)
 
+  def test_card_startup_applies_flag_after_controller_construction(self):
+    """get_car constructs CC before card.py applies the user's cluster flag."""
+    for lat, long, alert, expected in [(True, True, False, 2), (True, False, False, 0),
+                                      (False, True, False, 0), (True, True, True, 1)]:
+      with self.subTest(lat=lat, long=long, alert=alert):
+        cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=False)
+        cc.CP.flags = int(cc.CP.flags | FordFlags.HANDS_FREE_CLUSTER)
+        sends = _run(cc, lat_active=lat, long_active=long, steer_alert=alert, frames=1)
+        self.assertEqual(self._hands_off_value(sends, cc), expected)
+
+  def test_finalized_flag_updates_display_without_waiting_for_periodic_frame(self):
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=False)
+    self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 0)
+    cc.CP.flags = int(cc.CP.flags | FordFlags.HANDS_FREE_CLUSTER)
+    self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 2)
+    cc.CP.flags = int(cc.CP.flags & ~FordFlags.HANDS_FREE_CLUSTER)
+    self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 0)
+
   def test_toggle_on_lateral_inactive_is_0(self):
     """4. Toggle ON + lateral inactive: value 0."""
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)

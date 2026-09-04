@@ -68,16 +68,13 @@ class CarController(CarControllerBase):
     self._fp_angle_mode_engaged = self.flashpilot_angle is not None
     self._fp_shadow_curvature = 0.0
 
-    # FlashPilot: optional Lightning-only Ford cluster hands-free display request
-    # (IPMA_Data/LaHandsOff_D_Dsply = 2 only while both lateral and longitudinal
-    # are active) -- display + chime only. CP.flags is set once
-    # by card.py from the FlashPilotFordHandsFreeCluster Param (see
-    # FordFlags.HANDS_FREE_CLUSTER); re-checking the fingerprint here too is
-    # deliberate defense-in-depth on top of that gate, matching this class's own
-    # _flashpilot_angle_enabled gating shape above. See
-    # docs/flashpilot/FLASHPILOT_UI_FORD_HANDS_FREE_CLUSTER_AUDIT.md.
-    self._ford_hands_free_cluster = (CP.carFingerprint == CAR.FORD_F_150_LIGHTNING_MK1 and
-                                     bool(CP.flags & FordFlags.HANDS_FREE_CLUSTER))
+  @property
+  def _ford_hands_free_cluster(self):
+    # card.py applies this startup Param to the shared CP after get_car() has
+    # constructed this controller. Read the finalized flag instead of caching
+    # its pre-initialization value. This is a display-only Lightning option.
+    return (self.CP.carFingerprint == CAR.FORD_F_150_LIGHTNING_MK1 and
+            bool(self.CP.flags & FordFlags.HANDS_FREE_CLUSTER))
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
