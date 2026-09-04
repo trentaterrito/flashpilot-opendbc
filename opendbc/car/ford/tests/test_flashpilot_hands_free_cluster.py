@@ -32,12 +32,13 @@ def _make_cs():
                           acc_tja_status_stock_values=defaultdict(int), lkas_status_stock_values=defaultdict(int))
 
 
-def _make_cc_reader(lat_active=True, steer_alert=False):
+def _make_cc_reader(lat_active=True, long_active=True, steer_alert=False):
   # See test_flashpilot_angle.py's _make_cc_reader: actuators.as_builder() (used at
   # the end of CarController.update()) only exists on capnp reader objects, not on
   # locally-constructed builders -- round-trip through bytes to get a real reader.
   visual_alert = VisualAlert.steerRequired if steer_alert else VisualAlert.none
-  builder = structs.CarControl(latActive=lat_active, hudControl=structs.CarControl.HUDControl(visualAlert=visual_alert))
+  builder = structs.CarControl(latActive=lat_active, longActive=long_active,
+                               hudControl=structs.CarControl.HUDControl(visualAlert=visual_alert))
   return structs.CarControl.from_bytes(builder.to_bytes())
 
 
@@ -73,12 +74,12 @@ def _get_signal(packer, addr, sig_name, dat: bytes) -> int:
   return ival
 
 
-def _run(cc, lat_active, steer_alert, frames=100):
+def _run(cc, lat_active, steer_alert, frames=100, long_active=True):
   """LKAS_UI_STEP is 100 frames (1Hz @ 100Hz base) -- run enough frames that
   IPMA_Data is guaranteed to be sent at least once, accumulating can_sends."""
   all_sends = []
   for _ in range(frames):
-    with _make_cc_reader(lat_active=lat_active, steer_alert=steer_alert) as CC:
+    with _make_cc_reader(lat_active=lat_active, long_active=long_active, steer_alert=steer_alert) as CC:
       _, sends = cc.update(CC, _make_cs(), 0)
       all_sends += sends
   return all_sends
@@ -113,6 +114,18 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
     sends = _run(cc, lat_active=False, steer_alert=False)
     self.assertEqual(self._hands_off_value(sends, cc), 0)
+
+  def test_toggle_on_lateral_only_is_0(self):
+    """Toggle ON + Always-On Lateral without longitudinal: never claim hands-free."""
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
+    sends = _run(cc, lat_active=True, long_active=False, steer_alert=False)
+    self.assertEqual(self._hands_off_value(sends, cc), 0)
+
+  def test_longitudinal_transition_updates_cluster_immediately(self):
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
+    _run(cc, lat_active=True, long_active=False, steer_alert=False, frames=1)
+    sends = _run(cc, lat_active=True, long_active=True, steer_alert=False, frames=1)
+    self.assertEqual(self._hands_off_value(sends, cc), 2)
 
   def test_toggle_on_steer_alert_wins_is_1(self):
     """5. Toggle ON + steering alert: value 1, alert wins over hands-free display."""

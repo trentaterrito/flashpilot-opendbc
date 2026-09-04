@@ -47,6 +47,7 @@ class CarController(CarControllerBase):
     self.main_on_last = False
     self.lkas_enabled_last = False
     self.steer_alert_last = False
+    self.hands_free_last = False
     self.lead_distance_bars_last = None
     self.distance_bar_frame = 0
 
@@ -68,8 +69,8 @@ class CarController(CarControllerBase):
     self._fp_shadow_curvature = 0.0
 
     # FlashPilot: optional Lightning-only Ford cluster hands-free display request
-    # (IPMA_Data/LaHandsOff_D_Dsply = 2 while actively steering) -- display + chime
-    # only, independent of steering authorization/engagement. CP.flags is set once
+    # (IPMA_Data/LaHandsOff_D_Dsply = 2 only while both lateral and longitudinal
+    # are active) -- display + chime only. CP.flags is set once
     # by card.py from the FlashPilotFordHandsFreeCluster Param (see
     # FordFlags.HANDS_FREE_CLUSTER); re-checking the fingerprint here too is
     # deliberate defense-in-depth on top of that gate, matching this class's own
@@ -202,11 +203,13 @@ class CarController(CarControllerBase):
       self.gas = gas
 
     ### ui ###
-    send_ui = (self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or (self.steer_alert_last != steer_alert)
+    hands_free = self._ford_hands_free_cluster and CC.latActive and CC.longActive
+    send_ui = ((self.main_on_last != main_on) or (self.lkas_enabled_last != CC.latActive) or
+               (self.steer_alert_last != steer_alert) or (self.hands_free_last != hands_free))
     # send lkas ui msg at 1Hz or if ui state changes
     if (self.frame % CarControllerParams.LKAS_UI_STEP) == 0 or send_ui:
       can_sends.append(fordcan.create_lkas_ui_msg(self.packer, self.CAN, main_on, CC.latActive, steer_alert, hud_control, CS.lkas_status_stock_values,
-                                                  hands_free_cluster=self._ford_hands_free_cluster))
+                                                  hands_free_cluster=hands_free))
 
     # send acc ui msg at 5Hz or if ui state changes
     if hud_control.leadDistanceBars != self.lead_distance_bars_last:
@@ -222,6 +225,7 @@ class CarController(CarControllerBase):
     self.main_on_last = main_on
     self.lkas_enabled_last = CC.latActive
     self.steer_alert_last = steer_alert
+    self.hands_free_last = hands_free
     self.lead_distance_bars_last = hud_control.leadDistanceBars
 
     new_actuators = actuators.as_builder()

@@ -2,14 +2,15 @@
 
 #include "opendbc/safety/sunnypilot/mads.h"
 
-// FlashPilot integration boundary, not a replacement MADS state machine.
-// Upstream owns controls_allowed_lateral. This adapter can veto it, feeds only
-// fresh physical TJA intent, and never writes controls_allowed.
-// Selected only by the explicit Lightning CAN-FD MADS safety parameter.
+// FlashPilot integration boundary for Always-On Lateral, reusing the existing
+// independent-lateral transport. Upstream owns controls_allowed_lateral; this
+// adapter gates it on fresh host and vehicle evidence and never writes
+// controls_allowed. The safety flag name remains legacy wire compatibility.
 #define FORD_SP_STATUS_MAX_AGE_US 100000U
 
 typedef struct {
   bool enabled;
+  bool host_clear_seen;
   bool platform_ready;
   bool mode_ready;
   bool lateral_ok;
@@ -17,11 +18,7 @@ typedef struct {
   unsigned int lateral_counter;
   uint32_t lateral_progress_ts;
   bool main_on;
-  bool cruise_engaged_prev;
-  bool cruise_release_seen;
   bool brake_ok;
-  bool release_seen;
-  bool button_prev;
   uint32_t reason;
 } FordSunnyMadsGate;
 
@@ -51,7 +48,7 @@ static void ford_sp_reset_upstream(bool enabled) {
   // Clear history as on MCU BSS reset before calling the upstream initializer.
   m_mads_state = (MADSState){0};
   mads_button_press = MADS_BUTTON_UNAVAILABLE;
-  // Granting on a fresh physical press must not erase the already-validated
+  // Granting after fresh host and vehicle validation must not erase the
   // host veto input. Reset/revocation does clear it and requires a new heartbeat.
   if (!enabled) {
     heartbeat_engaged_mads = false;
@@ -65,9 +62,12 @@ static void ford_sp_revoke(lateral_revocation_reason reason) {
   // regen. Only selected Lightning MADS retains independent lateral permission;
   // all non-brake reasons still take the immediate revocation path below.
   if (ford_sp_gate.enabled && (reason != LATERAL_REVOKE_BRAKE) && (reason != LATERAL_REVOKE_REGEN)) {
+    const bool was_authorized = controls_allowed_lateral;
     ford_sp_reset_upstream(false);
-    ford_sp_gate.release_seen = false;
-    ford_sp_gate.button_prev = false;
+    ford_sp_gate.platform_ready = false;
+    if (was_authorized) {
+      ford_sp_gate.host_clear_seen = false;
+    }
     ford_sp_gate.reason = (uint32_t)reason;
     if (reason == LATERAL_REVOKE_RESET) {
       ford_sp_gate = (FordSunnyMadsGate){0};
@@ -102,16 +102,24 @@ static void ford_sp_check(void) {
   }
 }
 
+static void ford_sp_authorize_if_ready(void);
+
 // Called under the board's interrupt lock after legacy heartbeat bookkeeping.
-// Valid host input can restore eligibility, never grant lateral authorization.
+// Valid host input is one of several mandatory gates for lateral authorization.
 static inline void ford_sp_host_heartbeat(uint16_t longitudinal, uint16_t lateral, uint16_t length) {
-  heartbeat_engaged_mads = (lateral == 1U) && (longitudinal <= 1U) && (length == 0U);
+  const bool well_formed = (longitudinal <= 1U) && (length == 0U);
+  const bool positive = well_formed && (lateral == 1U);
+  const bool negative = well_formed && (lateral == 0U);
+  heartbeat_engaged_mads = positive;
   if (ford_sp_gate.enabled) {
-    ford_sp_gate.platform_ready = heartbeat_engaged_mads;
-    ford_sp_check();
+    // After reset/revocation, ignore stale positive intent until the host has
+    // explicitly observed and acknowledged cleared lateral authorization.
+    ford_sp_gate.platform_ready = positive && (controls_allowed_lateral || ford_sp_gate.host_clear_seen);
   }
   if (!heartbeat_engaged_mads) {
     safety_lateral_revoke(LATERAL_REVOKE_HOST);
+    // Record the acknowledgement after revocation clears the old latch.
+    ford_sp_gate.host_clear_seen = negative;
   }
 }
 
@@ -120,17 +128,14 @@ static bool ford_sp_lateral_allowed(void) {
   return ford_sp_gate.enabled ? controls_allowed_lateral : controls_allowed;
 }
 
-static void ford_sp_physical_request(bool toggle) {
-  if (controls_allowed_lateral) {
-    if (toggle) {
-      ford_sp_revoke(LATERAL_REVOKE_BUTTON);
-    }
-  } else {
+static void ford_sp_authorize_if_ready(void) {
+  if (ford_sp_gate.enabled && !controls_allowed_lateral && ford_sp_vehicle_ready()) {
     ford_sp_reset_upstream(true);
     mads_button_press = MADS_BUTTON_NOT_PRESSED;
     mads_state_update(vehicle_moving, false, false, false, false);
     mads_button_press = MADS_BUTTON_PRESSED;
     mads_state_update(vehicle_moving, false, false, false, false);
+    ford_sp_gate.host_clear_seen = false;
     ford_sp_gate.reason = 0U;
   }
 }
@@ -165,34 +170,14 @@ static void ford_sp_rx(const CANPacket_t *msg, bool valid) {
       if (msg->addr == 0x165U) {
         const unsigned int cruise = msg->data[1] & 7U;
         ford_sp_gate.main_on = (cruise >= 3U) && (cruise <= 5U);
-        const bool cruise_engaged = (cruise == 4U) || (cruise == 5U);
-        const bool cruise_rising = cruise_engaged && !ford_sp_gate.cruise_engaged_prev;
         const unsigned int brake_state = (msg->data[0] >> 4U) & 3U;
         // DBC: 1 = released, 2 = driver braking, 0/3 = not allowed.
         ford_sp_gate.brake_ok = (brake_state == 1U) || (brake_state == 2U);
-        if (!cruise_engaged && ford_sp_gate.main_on) {
-          ford_sp_gate.cruise_release_seen = true;
-        }
-        // SET/RESUME is represented by Ford's transition from ACC-main ready
-        // (state 3) to engaged (4/5). It may grant lateral, but never toggles
-        // an already-active lateral session off. Requiring state 3 first
-        // prevents a panda restart during active cruise from auto-engaging.
-        if (cruise_rising && ford_sp_gate.cruise_release_seen && ford_sp_vehicle_ready()) {
-          ford_sp_physical_request(false);
-        }
-        ford_sp_gate.cruise_engaged_prev = cruise_engaged;
       }
       ford_sp_check();
-      if ((msg->addr == 0x83U) && ford_sp_vehicle_ready()) {
-        const bool pressed = (msg->data[5] & 1U) != 0U;
-        if (pressed && !ford_sp_gate.button_prev && ford_sp_gate.release_seen) {
-          ford_sp_physical_request(true);
-        }
-        if (!pressed) {
-          ford_sp_gate.release_seen = true;
-        }
-        ford_sp_gate.button_prev = pressed;
-      }
+      // Always-On Lateral uses the existing heartbeat and vehicle-state gates.
+      // SET/CANCEL and the TJA button are deliberately non-authoritative.
+      ford_sp_authorize_if_ready();
     } else {
       // Other buses and unrelated messages cannot refresh required state.
     }

@@ -79,13 +79,17 @@ def test_heartbeat_cannot_resurrect_expired_status(h, timeout):
   assert not h.allowed()
   h.refresh()
   h.button(True)
-  assert h.allowed()  # refresh observed release; physical edge is still required
+  assert not h.allowed()
+  h.safety.test_sp_heartbeat(0, 0, 0)
+  h.safety.test_sp_heartbeat(0, 1, 0)
+  h.button(False)
+  assert h.allowed()
 
 
-def test_duplicate_current_heartbeat_is_not_new_intent(h):
+def test_duplicate_current_heartbeat_preserves_authorization(h):
   for _ in range(10):
     h.safety.test_sp_heartbeat(0, 1, 0)
-  assert not h.allowed()
+  assert h.allowed()
 
 
 from opendbc.car.structs import CarParams
@@ -105,7 +109,10 @@ class Harness:
     self.now = 1000
     self.safety.set_timer(self.now)
     self.safety.test_sp_configure(lightning)
+    self.safety.test_sp_heartbeat(0, 0, 0)
     self.refresh()
+    self.safety.test_sp_heartbeat(0, 1, 0)
+    self.button(False)
 
   def rx(self, name, **values):
     if name == "Lane_Assist_Data3_FD1":
@@ -140,8 +147,11 @@ class Harness:
     self.rx("Steering_Data_FD1", TjaButtnOnOffPress=int(pressed))
 
   def engage(self):
-    self.button(False)
-    self.button(True)
+    if not self.allowed():
+      self.safety.test_sp_heartbeat(0, 0, 0)
+      self.refresh()
+      self.safety.test_sp_heartbeat(0, 1, 0)
+      self.button(False)
     assert self.allowed()
 
   def allowed(self):
@@ -170,8 +180,8 @@ def test_independent_lateral_without_longitudinal(h):
     assert h.allowed()
 
 
-def test_set_transition_engages_lateral_but_cancel_does_not_disable_it(h):
-  assert not h.allowed()
+def test_set_and_cancel_do_not_change_lateral_authorization(h):
+  assert h.allowed()
   h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
   assert h.allowed()
   h.rx("EngBrakeData", CcStat_D_Actl=3, BpedDrvAppl_D_Actl=1)
@@ -198,7 +208,7 @@ def test_fault_while_cruise_remains_engaged_cannot_auto_reengage(h):
     assert not h.allowed()
 
 
-def test_cruise_master_off_revokes_both_and_requires_new_set(h):
+def test_cruise_master_off_revokes_and_requires_fresh_host_handshake(h):
   h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
   assert h.allowed()
   h.rx("EngBrakeData", CcStat_D_Actl=0, BpedDrvAppl_D_Actl=1)
@@ -206,10 +216,14 @@ def test_cruise_master_off_revokes_both_and_requires_new_set(h):
   h.refresh()
   assert not h.allowed()
   h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+  assert not h.allowed()
+  h.safety.test_sp_heartbeat(0, 0, 0)
+  h.safety.test_sp_heartbeat(0, 1, 0)
+  h.button(False)
   assert h.allowed()
 
 
-@pytest.mark.parametrize("host_packet", [(0, 0, 0), (1, 0, 0), (2, 1, 0), (65535, 1, 0),
+@pytest.mark.parametrize("host_packet", [(1, 0, 0), (2, 1, 0), (65535, 1, 0),
                                      (0, 2, 0), (0, 65535, 0), (0, 1, 1), (0, 1, 65535)])
 def test_malformed_or_negative_host_transport_revokes(h, host_packet):
   h.engage()
@@ -217,24 +231,30 @@ def test_malformed_or_negative_host_transport_revokes(h, host_packet):
   assert not h.allowed()
   h.safety.test_sp_heartbeat(0, 1, 0)
   assert not h.allowed()
-  h.button(True)
-  assert not h.allowed()
+  h.safety.test_sp_heartbeat(0, 0, 0)
+  h.safety.test_sp_heartbeat(0, 1, 0)
   h.button(False)
-  h.button(True)
+  assert h.allowed()
+
+
+def test_negative_host_transport_is_required_clear_ack(h):
+  h.safety.test_sp_heartbeat(0, 0, 0)
+  assert not h.allowed()
+  h.safety.test_sp_heartbeat(0, 1, 0)
+  h.button(False)
   assert h.allowed()
 
 
 @pytest.mark.parametrize("longitudinal", [0, 1])
-def test_valid_heartbeat_is_only_eligibility(h, longitudinal):
+def test_valid_heartbeat_preserves_always_on_lateral(h, longitudinal):
   h.safety.test_sp_heartbeat(longitudinal, 1, 0)
-  assert not h.allowed()
-  h.engage()
+  assert h.allowed()
   h.safety.test_sp_heartbeat(longitudinal, 1, 0)
   assert h.allowed()
 
 
 @pytest.mark.parametrize("reason", [r for r in range(1, 15) if r not in (4, 5)])
-def test_every_shared_revocation_clears_and_requires_new_physical_intent(h, reason):
+def test_every_shared_revocation_requires_clear_then_fresh_host_intent(h, reason):
   h.engage()
   h.safety.safety_lateral_revoke(reason)
   assert not h.allowed()
@@ -243,8 +263,9 @@ def test_every_shared_revocation_clears_and_requires_new_physical_intent(h, reas
   else:
     h.refresh()
     assert not h.allowed()
-    # A new physical SET transition is a valid fresh lateral request.
-    h.rx("EngBrakeData", CcStat_D_Actl=4, BpedDrvAppl_D_Actl=1)
+    h.safety.test_sp_heartbeat(0, 0, 0)
+    h.safety.test_sp_heartbeat(0, 1, 0)
+    h.button(False)
     assert h.allowed()
     assert h.steer()
 
@@ -280,7 +301,7 @@ def test_vehicle_faults_clear_without_resume(h, msg, fields):
   assert not h.allowed()
 
 
-def test_held_button_after_fault_does_not_reengage(h):
+def test_tja_button_is_non_authoritative_after_fault(h):
   h.engage()
   h.safety.safety_lateral_revoke(2)
   h.button(True)
@@ -289,15 +310,13 @@ def test_held_button_after_fault_does_not_reengage(h):
   assert not h.allowed()
   h.button(True)
   assert not h.allowed()  # physical intent alone cannot replace host eligibility
-  h.safety.test_sp_platform(True)
-  h.button(True)
-  assert not h.allowed()  # held press does not become a new selection
-  h.button(False)
+  h.safety.test_sp_heartbeat(0, 0, 0)
+  h.safety.test_sp_heartbeat(0, 1, 0)
   h.button(True)
   assert h.allowed()
   h.button(False)
   h.button(True)
-  assert not h.allowed()  # second deliberate press disengages
+  assert h.allowed()
 
 
 def test_status_read_does_not_refresh_status_liveness(h):
