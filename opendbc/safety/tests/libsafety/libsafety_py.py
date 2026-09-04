@@ -60,6 +60,16 @@ bool safety_rx_hook(CANPacket_t *msg);
 bool safety_tx_hook(CANPacket_t *msg);
 int safety_fwd_hook(int bus_num, int addr);
 int set_safety_hooks(uint16_t mode, uint16_t param);
+void test_sp_configure(bool lightning);
+void test_sp_platform(bool eligible);
+bool test_sp_authorized(void);
+bool test_sp_enabled(void);
+uint32_t test_sp_reason(void);
+bool test_sp_ready(void);
+bool test_sp_status_checksum(const CANPacket_t *msg);
+bool test_sp_status_ready(void);
+void test_sp_heartbeat(uint16_t longitudinal, uint16_t lateral, uint16_t length);
+void safety_lateral_revoke(int reason);
 
 void set_controls_allowed(bool c);
 bool get_controls_allowed(void);

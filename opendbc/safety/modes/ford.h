@@ -1,6 +1,7 @@
 #pragma once
 
 #include "opendbc/safety/declarations.h"
+#include "opendbc/safety/modes/ford_sunnypilot_mads.h"
 
 // Safety-relevant CAN messages for Ford vehicles.
 #define FORD_EngBrakeData          0x165U   // RX from PCM, for driver brake pedal and cruise state
@@ -116,19 +117,6 @@ static const CurvatureSteeringLimits FORD_STEERING_LIMITS = {
 // flashpilot_angle.py's _SOFT_ROC_BP/_SOFT_ROC_V, mirrored here ~2% looser so the
 // Python layer is always the binding constraint in normal operation and this is a
 // backstop, not a routine limiter).
-static const AngleSteeringLimits FORD_FP_PATH_ANGLE_LIMITS = {
-  .max_angle = 2617,          // 0.5235 rad * angle_deg_to_can -- see steer_angle_cmd_inactive_check note below
-  .angle_deg_to_can = 5000,   // 1 / (0.0005 rad per CAN unit), matches LatCtlPath_An_Actl's DBC scale
-  .angle_rate_up_lookup = {
-    .x = {9., 15., 25.},
-    .y = {0.0561, 0.04335, 0.00918}  // 2% looser than the Python soft ROC
-  },
-  .angle_rate_down_lookup = {
-    .x = {9., 15., 25.},
-    .y = {0.0561, 0.04335, 0.00918}
-  },
-  .frequency = 20U,  // LateralMotionControl2 @ 20Hz, matches CarControllerParams.STEER_STEP cadence
-};
 
 // FlashPilot: angle_mode_engaged + shadow_curvature, read synchronously out of
 // Lane_Assist_Data1's unused bits inside ford_tx_hook (no separate CAN message, no RX --
@@ -143,7 +131,10 @@ static int16_t fp_shadow_curvature_raw = 0;  // wire units, scale 1e-6 1/m (see 
 // shadow_curvature is packed at scale 1e-6 1/m; convert to the CAN units the existing
 // curvature deviation check expects, matching FORD_STEERING_LIMITS.curvature_to_can (50000,
 // i.e. physical scale 2e-5): raw * 1e-6 * 50000 = raw * 0.05.
-#define FORD_FP_SHADOW_CURVATURE_TO_CAN(raw) ((int)((float)(raw) * 0.05f))
+static int ford_fp_shadow_curvature_to_can(int16_t raw) {
+  const float scaled = (float)raw * 0.05f;
+  return (int)scaled;
+}
 
 static int fp_desired_path_angle_last = 0;
 
@@ -158,7 +149,7 @@ static int fp_desired_path_angle_last = 0;
 // angle-cmd-checks path, for the same reason).
 static bool fp_path_angle_cmd_checks(int desired_path_angle, bool steer_control_enabled, const AngleSteeringLimits limits) {
   bool violation = false;
-  if (controls_allowed && steer_control_enabled) {
+  if (ford_sp_lateral_allowed() && steer_control_enabled) {
     const float fudged_speed = (vehicle_speed.min / VEHICLE_SPEED_FACTOR) - 1.;
     int delta = (safety_interpolate(limits.angle_rate_up_lookup, fudged_speed) * limits.angle_deg_to_can) + 1.;
     int highest = fp_desired_path_angle_last + delta;
@@ -170,7 +161,7 @@ static bool fp_path_angle_cmd_checks(int desired_path_angle, bool steer_control_
   if (!steer_control_enabled) {
     violation |= (desired_path_angle != 0);
   }
-  if (!controls_allowed) {
+  if (!ford_sp_lateral_allowed()) {
     violation |= steer_control_enabled;
   }
   return violation;
@@ -250,6 +241,20 @@ static void ford_rx_hook(const CANPacket_t *msg) {
 }
 
 static bool ford_tx_hook(const CANPacket_t *msg) {
+  // Scope-only MISRA cleanup; all existing path-angle limit values unchanged.
+  static const AngleSteeringLimits FORD_FP_PATH_ANGLE_LIMITS = {
+    .max_angle = 2617,          // 0.5235 rad * angle_deg_to_can -- see steer_angle_cmd_inactive_check note below
+    .angle_deg_to_can = 5000,   // 1 / (0.0005 rad per CAN unit), matches LatCtlPath_An_Actl's DBC scale
+    .angle_rate_up_lookup = {
+      .x = {9., 15., 25.},
+      .y = {0.0561, 0.04335, 0.00918}  // 2% looser than the Python soft ROC
+    },
+    .angle_rate_down_lookup = {
+      .x = {9., 15., 25.},
+      .y = {0.0561, 0.04335, 0.00918}
+    },
+    .frequency = 20U,  // LateralMotionControl2 @ 20Hz, matches CarControllerParams.STEER_STEP cadence
+  };
   const LongitudinalLimits FORD_LONG_LIMITS = {
     // acceleration cmd limits (used for brakes)
     // Signal: AccBrkTot_A_Rq
@@ -330,12 +335,18 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     fp_angle_mode_engaged = (msg->data[4] & 0x1U) != 0U;
     uint16_t fp_shadow_raw_u = ((uint16_t)msg->data[5] << 8) | (uint16_t)msg->data[6];
     fp_shadow_curvature_raw = (int16_t)fp_shadow_raw_u;
+    if (ford_sp_gate.enabled) {
+      ford_sp_gate.mode_ready = fp_angle_mode_engaged && (action == 0U);
+    }
   }
 
   // Safety check for LateralMotionControl action
   if (msg->addr == FORD_LateralMotionControl) {
     // Signal: LatCtl_D_Rq
     bool steer_control_enabled = ((msg->data[4] >> 2) & 0x7U) != 0U;
+    if (ford_sp_gate.enabled && steer_control_enabled) {
+      tx = false;  // Independent permission is Lightning path-angle-only.
+    }
     unsigned int raw_curvature = (msg->data[0] << 3) | (msg->data[1] >> 5);
     unsigned int raw_curvature_rate = ((msg->data[1] & 0x1FU) << 8) | msg->data[2];
     unsigned int raw_path_angle = (msg->data[3] << 3) | (msg->data[4] >> 5);
@@ -365,6 +376,9 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     int desired_curvature = raw_curvature - FORD_INACTIVE_CURVATURE;  // /FORD_STEERING_LIMITS.curvature_to_can to get real curvature
 
     bool violation = false;
+    if (ford_sp_gate.enabled) {
+      violation |= steer_control_enabled && (!fp_angle_mode_engaged || !ford_sp_lateral_allowed());
+    }
     // FlashPilot: angle mode (fp_angle_mode_engaged, this frame's Lightning-only state)
     // holds curvature at its inactive sentinel and path_angle at a real, nonzero value --
     // the exact opposite of curvature-primary mode. path_offset/curvature_rate stay at
@@ -399,7 +413,7 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
       // Lane_Assist_Data1 carried (since real curvature is pinned inactive on the wire and
       // can't be checked directly). Only runs when curvature is confirmed inactive above.
       if (desired_curvature == 0) {
-        violation |= fp_shadow_curvature_error_check(FORD_FP_SHADOW_CURVATURE_TO_CAN(fp_shadow_curvature_raw));
+        violation |= fp_shadow_curvature_error_check(ford_fp_shadow_curvature_to_can(fp_shadow_curvature_raw));
       }
     } else {
       // Unmodified upstream path: path_angle must stay at its inactive sentinel, and
@@ -417,6 +431,8 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config ford_init(uint16_t param) {
+  ford_sp_gate = (FordSunnyMadsGate){0};
+  ford_sp_reset_upstream(false);
   // FlashPilot: reset path-angle-mode state on every (re-)init, mirroring how
   // safety.h's set_safety_hooks() already resets desired_angle_last/curvature_state
   // above this call. Without this, these statics would leak stale values across a
@@ -438,6 +454,8 @@ static safety_config ford_init(uint16_t param) {
     {.msg = {{FORD_EngBrakeData, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{FORD_EngVehicleSpThrottle, 0, 8, 100U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
     {.msg = {{FORD_DesiredTorqBrk, 0, 8, 50U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    // SunnyPilot's Ford TJA RX registration. Excluded when MADS is OFF.
+    {.msg = {{FORD_Steering_Data_FD1, 0, 8, 10U, .ignore_checksum = true, .ignore_counter = true, .ignore_quality_flag = true}, { 0 }, { 0 }}},
   };
 
   #define FORD_COMMON_TX_MSGS \
@@ -467,7 +485,9 @@ static safety_config ford_init(uint16_t param) {
   };
 
   const uint16_t FORD_PARAM_CANFD = 2;
+  const uint16_t FORD_PARAM_LIGHTNING_MADS = 4;
   const bool ford_canfd = GET_FLAG(param, FORD_PARAM_CANFD);
+  ford_sp_gate.enabled = ford_canfd && GET_FLAG(param, FORD_PARAM_LIGHTNING_MADS);
 
   safety_config ret;
   if (ford_canfd) {
@@ -481,6 +501,9 @@ static safety_config ford_init(uint16_t param) {
   } else {
     ret = BUILD_SAFETY_CFG(ford_rx_checks, FORD_LONG_TX_MSGS);
   }
+  if (!ford_sp_gate.enabled) {
+    ret.rx_checks_len -= 1;
+  }
   return ret;
 }
 
@@ -492,4 +515,7 @@ const safety_hooks ford_hooks = {
   .get_checksum = ford_get_checksum,
   .compute_checksum = ford_compute_checksum,
   .get_quality_flag_valid = ford_get_quality_flag_valid,
+  .lateral_revoke = ford_sp_revoke,
+  .lateral_check = ford_sp_check,
+  .lateral_rx = ford_sp_rx,
 };

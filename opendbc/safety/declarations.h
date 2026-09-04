@@ -219,6 +219,28 @@ typedef void (*rx_hook)(const CANPacket_t *msg);
 typedef bool (*tx_hook)(const CANPacket_t *msg);  // returns true if the message is allowed
 typedef bool (*fwd_hook)(int bus_num, int addr);      // returns true if the message should be blocked from forwarding
 
+// Optional, fail-closed notifications for a separately owned lateral permission.
+// They never grant or modify controls_allowed. Unimplemented hooks are NULL.
+typedef enum {
+  LATERAL_REVOKE_RESET = 1,
+  LATERAL_REVOKE_INVALID_RX,
+  LATERAL_REVOKE_RX_TIMEOUT,
+  LATERAL_REVOKE_BRAKE,
+  LATERAL_REVOKE_REGEN,
+  LATERAL_REVOKE_OVERRIDE,
+  LATERAL_REVOKE_RELAY,
+  LATERAL_REVOKE_SPEED,
+  LATERAL_REVOKE_TX,
+  LATERAL_REVOKE_PLATFORM,
+  LATERAL_REVOKE_VEHICLE,
+  LATERAL_REVOKE_HOST,
+  LATERAL_REVOKE_STALE,
+  LATERAL_REVOKE_BUTTON,
+} lateral_revocation_reason;
+typedef void (*lateral_revoke_hook)(lateral_revocation_reason reason);
+typedef void (*lateral_check_hook)(void);
+typedef void (*lateral_rx_hook)(const CANPacket_t *msg, bool valid);
+
 typedef struct {
   safety_hook_init init;
   rx_hook rx;
@@ -228,7 +250,12 @@ typedef struct {
   compute_checksum_t compute_checksum;
   get_counter_t get_counter;
   get_quality_flag_valid_t get_quality_flag_valid;
+  lateral_revoke_hook lateral_revoke;
+  lateral_check_hook lateral_check;
+  lateral_rx_hook lateral_rx;
 } safety_hooks;
+
+void safety_lateral_revoke(lateral_revocation_reason reason);
 
 bool safety_rx_hook(const CANPacket_t *msg);
 bool safety_tx_hook(CANPacket_t *msg);

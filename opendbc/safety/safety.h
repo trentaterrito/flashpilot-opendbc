@@ -98,12 +98,25 @@ safety_config current_safety_config;
 static void generic_rx_checks(void);
 static void stock_ecu_check(bool stock_ecu_detected);
 
+void safety_lateral_revoke(lateral_revocation_reason reason) {
+  if (current_hooks->lateral_revoke != NULL) {
+    current_hooks->lateral_revoke(reason);
+  }
+}
+
+static void safety_lateral_check(void) {
+  if (current_hooks->lateral_check != NULL) {
+    current_hooks->lateral_check();
+  }
+}
+
 static bool is_msg_valid(RxCheck addr_list[], int index) {
   bool valid = true;
   if (index != -1) {
     if (!addr_list[index].status.valid_checksum || !addr_list[index].status.valid_quality_flag || (addr_list[index].status.wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
       controls_allowed = false;
+      safety_lateral_revoke(LATERAL_REVOKE_INVALID_RX);
     }
   }
   return valid;
@@ -191,6 +204,8 @@ static bool rx_msg_safety_check(const CANPacket_t *msg,
 }
 
 bool safety_rx_hook(const CANPacket_t *msg) {
+  // Check expiry before a fresh RX can overwrite the old timestamps.
+  safety_lateral_check();
   bool controls_allowed_prev = controls_allowed;
 
   bool valid = rx_msg_safety_check(msg, &current_safety_config, current_hooks);
@@ -218,6 +233,11 @@ bool safety_rx_hook(const CANPacket_t *msg) {
     heartbeat_engaged_mismatches = 0;
   }
 
+  // Includes invalid and unwhitelisted frames, unlike the normal vehicle RX hook.
+  if (current_hooks->lateral_rx != NULL) {
+    current_hooks->lateral_rx(msg, valid);
+  }
+
   return valid;
 }
 
@@ -236,6 +256,7 @@ static bool tx_msg_safety_check(const CANPacket_t *msg, const CanMsg msg_list[],
 }
 
 bool safety_tx_hook(CANPacket_t *msg) {
+  safety_lateral_check();
   bool whitelisted = tx_msg_safety_check(msg, current_safety_config.tx_msgs, current_safety_config.tx_msgs_len);
   if ((current_safety_mode == SAFETY_ALLOUTPUT) || (current_safety_mode == SAFETY_ELM327)) {
     whitelisted = true;
@@ -246,7 +267,18 @@ bool safety_tx_hook(CANPacket_t *msg) {
     safety_allowed = current_hooks->tx(msg);
   }
 
-  return !relay_malfunction && whitelisted && safety_allowed;
+  bool allowed = !relay_malfunction && whitelisted && safety_allowed;
+  // A rejected, correctly shaped Ford ACCDATA command is still rejected, but
+  // is not a steering fault. In-flight long requests after braking must not
+  // cancel independently authorized MADS lateral. Other TX failures retain
+  // their existing revocation, including malformed/wrong-bus and steering TX.
+  const bool ford_long_rejection = (current_safety_mode == SAFETY_FORD) && ford_sp_gate.enabled &&
+                                  (msg->addr == FORD_ACCDATA) && (msg->bus == FORD_MAIN_BUS) &&
+                                  (GET_LEN(msg) == 8U) && !relay_malfunction;
+  if (!allowed && !ford_long_rejection) {
+    safety_lateral_revoke(LATERAL_REVOKE_TX);
+  }
+  return allowed;
 }
 
 static int get_fwd_bus(int bus_num) {
@@ -316,6 +348,7 @@ void gen_crc_lookup_table_16(uint16_t poly, uint16_t crc_lut[]) {
 
 // 1Hz safety function called by main. Now just a check for lagging safety messages
 void safety_tick(const safety_config *cfg) {
+  safety_lateral_check();
   const uint8_t MAX_MISSED_MSGS = 10U;
   bool rx_checks_invalid = false;
   uint32_t ts = microsecond_timer_get();
@@ -338,6 +371,7 @@ void safety_tick(const safety_config *cfg) {
       if (lagging || frequency_invalid || !is_msg_valid(cfg->rx_checks, i)) {
         rx_checks_invalid = true;
         controls_allowed = false;
+        safety_lateral_revoke(LATERAL_REVOKE_RX_TIMEOUT);
       }
     }
   }
@@ -347,6 +381,7 @@ void safety_tick(const safety_config *cfg) {
 
 static void relay_malfunction_set(void) {
   relay_malfunction = true;
+  safety_lateral_revoke(LATERAL_REVOKE_RELAY);
 }
 
 static void generic_rx_checks(void) {
@@ -355,18 +390,21 @@ static void generic_rx_checks(void) {
   // exit controls on rising edge of brake press
   if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
     controls_allowed = false;
+    safety_lateral_revoke(LATERAL_REVOKE_BRAKE);
   }
   brake_pressed_prev = brake_pressed;
 
   // exit controls on rising edge of regen paddle
   if (regen_braking && (!regen_braking_prev || vehicle_moving)) {
     controls_allowed = false;
+    safety_lateral_revoke(LATERAL_REVOKE_REGEN);
   }
   regen_braking_prev = regen_braking;
 
   // exit controls on rising edge of steering override/disengage
   if (steering_disengage && !steering_disengage_prev) {
     controls_allowed = false;
+    safety_lateral_revoke(LATERAL_REVOKE_OVERRIDE);
   }
   steering_disengage_prev = steering_disengage;
 }
@@ -394,6 +432,8 @@ static void reset_sample(struct sample_t *sample) {
 }
 
 int set_safety_hooks(uint16_t mode, uint16_t param) {
+  // Notify the OLD mode, including when switching away from Ford or on bad mode ID.
+  safety_lateral_revoke(LATERAL_REVOKE_RESET);
   const safety_hook_config safety_hook_registry[] = {
     {SAFETY_SILENT, &nooutput_hooks},
     {SAFETY_HONDA_NIDEC, &honda_nidec_hooks},
@@ -551,5 +591,6 @@ void speed_mismatch_check(const float speed_2) {
   bool is_invalid_speed = SAFETY_ABS(speed_2 - ((float)vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR)) > MAX_SPEED_DELTA;
   if (is_invalid_speed) {
     controls_allowed = false;
+    safety_lateral_revoke(LATERAL_REVOKE_SPEED);
   }
 }

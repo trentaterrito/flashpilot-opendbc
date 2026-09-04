@@ -13,6 +13,39 @@ uint32_t microsecond_timer_get(void) {
 #include "opendbc/safety/safety.h"
 #include "opendbc/safety/ignition.h"
 
+// Exercise the production initializer; only the board predicate is simulated.
+static bool test_sp_board_ready(void) {
+  return heartbeat_engaged_mads;
+}
+
+void test_sp_configure(bool lightning) {
+  const uint16_t param = lightning ? (current_safety_param | 4U) : (current_safety_param & ~4U);
+  (void)set_safety_hooks(current_safety_mode, param);
+  ford_sp_set_board_check(test_sp_board_ready);
+}
+
+void test_sp_platform(bool eligible) {
+  heartbeat_engaged_mads = eligible;
+  ford_sp_gate.platform_ready = eligible;
+  if (!eligible) {
+    ford_sp_revoke(LATERAL_REVOKE_PLATFORM);
+  }
+}
+
+bool test_sp_authorized(void) {
+  ford_sp_check();
+  return controls_allowed_lateral;
+}
+
+bool test_sp_enabled(void) { return ford_sp_gate.enabled; }
+uint32_t test_sp_reason(void) { return ford_sp_gate.reason; }
+bool test_sp_ready(void) { return ford_sp_vehicle_ready(); }
+bool test_sp_status_checksum(const CANPacket_t *msg) { return ford_sp_status_checksum_valid(msg); }
+bool test_sp_status_ready(void) { return ford_sp_status_ready(); }
+void test_sp_heartbeat(uint16_t longitudinal, uint16_t lateral, uint16_t length) {
+  ford_sp_host_heartbeat(longitudinal, lateral, length);
+}
+
 void safety_tick_current_safety_config() {
   safety_tick(&current_safety_config);
 }

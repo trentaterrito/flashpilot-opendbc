@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/sunnypilot/opendbc",
+  "commit": "f95f996f5917dcbbf2e32fe51b606a24cf836af6",
+  "superproject": "https://github.com/sunnypilot/sunnypilot",
+  "superproject_commit": "e87dbbaba710bbfe7661d9ff064d46170cac9442",
+  "panda_commit": "74a0adced421e8b7acd728d0f9988ce225423f13",
+  "integration": "DEVELOPMENT_WIRED_NO_RUNTIME_ENABLE",
+  "local_changes": {
+    "mads_heartbeat_engaged_check": "Internal linkage in declaration/definition only (MISRA 8.7); body unchanged. Production uses immediate veto, not this reference-only three-check helper."
+  },
+  "git_blobs": {
+    "opendbc/safety/sunnypilot/mads.h": "a87ecf68fb0b89e7d3c5adb5011db722ea52701c",
+    "opendbc/safety/sunnypilot/mads_declarations.h": "a161a2aa5d98402e27097179203b816a078a32b6",
+    "opendbc/safety/sunnypilot/LICENSE.md": "650b6f55b3764720f9cc11251b0d8921eae60792"
+  }
+}
