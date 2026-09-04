@@ -14,8 +14,8 @@ this file implements, including what was deliberately left out and why:
   - No lane-change-aware precision/gain scaling (follows from the above -- no modelV2
     subscription is added). precision_type is always 1 (Precise), matching upstream's
     own existing hardcoded default.
-  - No lane centering trim, no pinion-angle curvature measurement, no Params-backed
-    user tuning, no post-override "stall blip" recovery pulse (BluePilot's own
+  - No lane centering trim, no pinion-angle curvature measurement, no post-override
+    "stall blip" recovery pulse (BluePilot's own
     thresholds for that are tuned against Mach-E road-test data we have no reason to
     believe transfers to the Lightning's PSCM; adding it speculatively would be
     exactly the kind of unverified change this project's guardrails prohibit).
@@ -53,8 +53,8 @@ _GAIN_LOW_HIGH_SPEED = 0.95
 _GAIN_HIGH_HIGH_SPEED = 0.95
 
 # Known-good BluePilot Angle tuning from the physical Lightning. These are the
-# three user adjustment factors applied on top of the platform base gains; they
-# are constants here until FlashPilot grows a dedicated Params/UI surface.
+# three user adjustment factors applied on top of the platform base gains. These
+# remain the controller defaults; openpilot may override them once at startup.
 FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR = 0.98
 FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR = 0.90
 FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR = 0.83
@@ -91,13 +91,15 @@ def pscm_d_ref_m(v_ego_ms: float) -> float:
   return d
 
 
-def path_angle_curvature_factor(v_ego_ms: float, curvature: float) -> float:
-  """BluePilot-equivalent Lightning gain interpolation without its Params/UI layer."""
+def path_angle_curvature_factor(v_ego_ms: float, curvature: float,
+                                low_speed_factor: float = FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR,
+                                high_speed_factor: float = FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR,
+                                high_speed_low_curve_factor: float = FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR) -> float:
+  """BluePilot-equivalent Lightning gain interpolation with canonical defaults."""
   low_gain = float(interp(v_ego_ms, _GAIN_SPEED_BP_MS,
-                          (1.0, _GAIN_LOW_HIGH_SPEED * FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR)))
+                          (1.0, _GAIN_LOW_HIGH_SPEED * high_speed_low_curve_factor)))
   high_gain = float(interp(v_ego_ms, _GAIN_SPEED_BP_MS,
-                           (1.30 * FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR,
-                            _GAIN_HIGH_HIGH_SPEED * FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR)))
+                           (1.30 * low_speed_factor, _GAIN_HIGH_HIGH_SPEED * high_speed_factor)))
   return float(interp(abs(curvature), _GAIN_CURVATURE_BP, (low_gain, high_gain)))
 
 
@@ -167,6 +169,16 @@ class FlashPilotAngleController:
   def __init__(self):
     self.path_angle_last = 0.0
     self.human_turn_detector = HumanTurnDetector()
+    self.low_speed_factor = FLASHPILOT_LOW_SPEED_ADJUSTMENT_FACTOR
+    self.high_speed_factor = FLASHPILOT_HIGH_SPEED_ADJUSTMENT_FACTOR
+    self.high_speed_low_curve_factor = FLASHPILOT_HIGH_SPEED_LOW_CURVE_ADJUSTMENT_FACTOR
+
+  def set_adjustment_factors(self, low_speed: float, high_speed: float, high_speed_low_curve: float) -> None:
+    # Same bounds as BluePilot's existing angle controls. This only replaces
+    # constants with startup-loaded values; interpolation and limits are unchanged.
+    self.low_speed_factor = float(clip(low_speed, 0.5, 1.5))
+    self.high_speed_factor = float(clip(high_speed, 0.5, 1.5))
+    self.high_speed_low_curve_factor = float(clip(high_speed_low_curve, 0.25, 1.25))
 
   def reset(self) -> None:
     self.path_angle_last = 0.0
@@ -205,7 +217,8 @@ class FlashPilotAngleController:
       kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
                              current_curvature + CarControllerParams.CURVATURE_ERROR))
 
-    curvature_factor = path_angle_curvature_factor(v_ego, kappa_cmd)
+    curvature_factor = path_angle_curvature_factor(v_ego, kappa_cmd, self.low_speed_factor,
+                                                   self.high_speed_factor, self.high_speed_low_curve_factor)
 
     d_ref = pscm_d_ref_m(v_ego)  # noqa: F841 -- geometry documented for reference; the
     # gain-table form above (ported from lateral_angle_ext.py) is what's actually applied.

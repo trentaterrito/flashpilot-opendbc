@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from opendbc.car import Bus, structs
 from opendbc.car.ford.carcontroller import CarController
-from opendbc.car.ford.flashpilot_angle import path_angle_curvature_factor
+from opendbc.car.ford.flashpilot_angle import FlashPilotAngleController, path_angle_curvature_factor
 from opendbc.car.ford.values import CAR, DBC, FordFlags
 
 FORD_LateralMotionControl2 = 0x3D6
@@ -38,6 +38,24 @@ class TestFlashPilotAngleTuning(unittest.TestCase):
     for speed, curvature, expected in cases:
       with self.subTest(speed=speed, curvature=curvature):
         self.assertAlmostEqual(path_angle_curvature_factor(speed, curvature), expected)
+
+  def test_default_arguments_preserve_canonical_factors(self):
+    self.assertEqual(path_angle_curvature_factor(13.5, 0.0),
+                     path_angle_curvature_factor(13.5, 0.0, 0.98, 0.90, 0.83))
+    self.assertEqual(path_angle_curvature_factor(26.82, 0.001),
+                     path_angle_curvature_factor(26.82, 0.001, 0.98, 0.90, 0.83))
+
+  def test_user_factors_change_only_factor_endpoints(self):
+    self.assertAlmostEqual(path_angle_curvature_factor(13.5, 0.001, 1.01, 0.91, 0.84), 1.30 * 1.01)
+    self.assertAlmostEqual(path_angle_curvature_factor(26.82, 0.0007, 1.01, 0.91, 0.84), 0.95 * 0.84)
+    self.assertAlmostEqual(path_angle_curvature_factor(26.82, 0.001, 1.01, 0.91, 0.84), 0.95 * 0.91)
+
+  def test_controller_factor_bounds(self):
+    controller = FlashPilotAngleController()
+    controller.set_adjustment_factors(2.0, 0.1, 2.0)
+    self.assertEqual(controller.low_speed_factor, 1.5)
+    self.assertEqual(controller.high_speed_factor, 0.5)
+    self.assertEqual(controller.high_speed_low_curve_factor, 1.25)
 
 
 def _make_controller(fingerprint):
