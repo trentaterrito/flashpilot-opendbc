@@ -264,13 +264,10 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
 
   Frequency is 1Hz.
 
-  FlashPilot: hands_free_cluster is a Lightning-only, default-off option (see
-  CarController) that requests LaHandsOff_D_Dsply's Level2 ("hands-free" cluster
-  display + chime) while actively steering and not otherwise alerting. Display
-  only -- independent of steering authorization, engagement, and the PSCM's own
-  real hands-sensor signal (LaHandsOff_B_Actl on Lane_Assist_Data3_FD1), which
-  this does not read or affect. See
-  docs/flashpilot/FLASHPILOT_UI_FORD_HANDS_FREE_CLUSTER_AUDIT.md.
+  FlashPilot: retain the hands_free_cluster API/Param wiring, but do not use
+  LaHandsOff_D_Dsply for hands-free presentation. Level2 is a take-the-wheel
+  warning WITH chime, not BlueCruise status. A replacement display signal is
+  pending vehicle-specific validation. Genuine steering alerts remain intact.
   """
 
   # LaActvStats_D_Dsply
@@ -305,8 +302,6 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
 
   if steer_alert:
     hands_on_wheel_dsply = 1                                # unchanged: steering alert always takes precedence
-  elif hands_free_cluster and enabled:
-    hands_on_wheel_dsply = 2                                # FlashPilot: Lightning-only hands-free display + chime
   else:
     hands_on_wheel_dsply = 0                                # unchanged
 

@@ -1,12 +1,13 @@
 """
-FlashPilot: tests for the Lightning-only Ford hands-free cluster display option
-(IPMA_Data / LaHandsOff_D_Dsply). Display-only -- see
-docs/flashpilot/FLASHPILOT_UI_FORD_HANDS_FREE_CLUSTER_AUDIT.md. Constructs a real
+FlashPilot: the retained cluster preference must NOT request a Level2 hands-on
+warning as hands-free presentation. Genuine alerts keep their normal value.
+Constructs a real
 CarController and calls the real update() (not a mock of it), matching the
 established pattern in test_flashpilot_angle.py.
 """
 import unittest
 from collections import defaultdict
+from itertools import product
 from types import SimpleNamespace
 
 from opendbc.car import Bus, structs
@@ -86,6 +87,18 @@ def _run(cc, lat_active, steer_alert, frames=100, long_active=True):
 
 
 class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
+  def test_preference_cannot_invent_warning_for_any_control_state(self):
+    for alpha, lat, long, alert in product((False, True), repeat=4):
+      with self.subTest(alpha=alpha, lat=lat, long=long, alert=alert):
+        controllers = [_make_controller(CAR.FORD_F_150_LIGHTNING_MK1, enabled) for enabled in (False, True)]
+        outputs = []
+        for cc in controllers:
+          cc.CP.openpilotLongitudinalControl = alpha
+          sends = _run(cc, lat_active=lat, long_active=long, steer_alert=alert)
+          self.assertEqual(self._hands_off_value(sends, cc), 1 if alert else 0)
+          outputs.append(sends)
+        self.assertEqual(outputs[0], outputs[1])
+
   def _hands_off_value(self, can_sends, cc):
     dat = _find_msg(can_sends, FORD_IPMA_Data)
     self.assertIsNotNone(dat, "IPMA_Data must be sent")
@@ -103,15 +116,15 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
     sends = _run(cc, lat_active=True, steer_alert=True)
     self.assertEqual(self._hands_off_value(sends, cc), 1)
 
-  def test_toggle_on_lightning_engaged_no_alert_is_2(self):
-    """3. Toggle ON + Lightning + latActive + no alert: value 2."""
+  def test_toggle_on_lightning_engaged_no_alert_is_0(self):
+    """Toggle ON + both axes active must not generate a take-wheel warning."""
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
     sends = _run(cc, lat_active=True, steer_alert=False)
-    self.assertEqual(self._hands_off_value(sends, cc), 2)
+    self.assertEqual(self._hands_off_value(sends, cc), 0)
 
   def test_card_startup_applies_flag_after_controller_construction(self):
     """get_car constructs CC before card.py applies the user's cluster flag."""
-    for lat, long, alert, expected in [(True, True, False, 2), (True, False, False, 0),
+    for lat, long, alert, expected in [(True, True, False, 0), (True, False, False, 0),
                                       (False, True, False, 0), (True, True, True, 1)]:
       with self.subTest(lat=lat, long=long, alert=alert):
         cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=False)
@@ -119,11 +132,11 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
         sends = _run(cc, lat_active=lat, long_active=long, steer_alert=alert, frames=1)
         self.assertEqual(self._hands_off_value(sends, cc), expected)
 
-  def test_finalized_flag_updates_display_without_waiting_for_periodic_frame(self):
+  def test_finalized_flag_never_introduces_warning(self):
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=False)
     self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 0)
     cc.CP.flags = int(cc.CP.flags | FordFlags.HANDS_FREE_CLUSTER)
-    self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 2)
+    self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 0)
     cc.CP.flags = int(cc.CP.flags & ~FordFlags.HANDS_FREE_CLUSTER)
     self.assertEqual(self._hands_off_value(_run(cc, True, False, frames=1), cc), 0)
 
@@ -139,11 +152,11 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
     sends = _run(cc, lat_active=True, long_active=False, steer_alert=False)
     self.assertEqual(self._hands_off_value(sends, cc), 0)
 
-  def test_longitudinal_transition_updates_cluster_immediately(self):
+  def test_longitudinal_transition_does_not_generate_warning(self):
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
     _run(cc, lat_active=True, long_active=False, steer_alert=False, frames=1)
     sends = _run(cc, lat_active=True, long_active=True, steer_alert=False, frames=1)
-    self.assertEqual(self._hands_off_value(sends, cc), 2)
+    self.assertEqual(self._hands_off_value(sends, cc), 0)
 
   def test_toggle_on_steer_alert_wins_is_1(self):
     """5. Toggle ON + steering alert: value 1, alert wins over hands-free display."""
@@ -165,8 +178,7 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
         self.assertEqual(self._hands_off_value(sends, cc), 1)
 
   def test_all_other_ipma_fields_unchanged_on_vs_off(self):
-    """7. All other IPMA_Data fields: unchanged ON vs OFF (same scenario --
-    engaged, no alert -- where the toggle *does* change LaHandsOff_D_Dsply)."""
+    """The retained preference must leave the entire IPMA payload unchanged."""
     cc_off = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=False)
     cc_on = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
     dat_off = _find_msg(_run(cc_off, lat_active=True, steer_alert=False), FORD_IPMA_Data)
@@ -182,10 +194,7 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
         self.assertEqual(_get_signal(cc_off.packer, FORD_IPMA_Data, field, dat_off),
                          _get_signal(cc_on.packer, FORD_IPMA_Data, field, dat_on))
 
-    # and confirm the one field that's *allowed* to differ actually does, so this
-    # test isn't vacuously passing on two identical (both-0) messages
-    self.assertNotEqual(_get_signal(cc_off.packer, FORD_IPMA_Data, "LaHandsOff_D_Dsply", dat_off),
-                        _get_signal(cc_on.packer, FORD_IPMA_Data, "LaHandsOff_D_Dsply", dat_on))
+    self.assertEqual(dat_off, dat_on)
 
   def test_all_other_can_messages_unchanged_on_vs_off(self):
     """8. All other CAN messages: unchanged ON vs OFF -- proves no steering,
@@ -202,8 +211,6 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
       with self.subTest(i=i, addr=hex(addr_off)):
         self.assertEqual(addr_off, addr_on)
         self.assertEqual(bus_off, bus_on)
-        if addr_off == FORD_IPMA_Data:
-          continue  # the one message this toggle is allowed to change
         self.assertEqual(dat_off, dat_on, f"message {hex(addr_off)} must be byte-identical regardless of the toggle")
 
   def test_param_unset_matches_off(self):
