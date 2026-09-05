@@ -237,6 +237,25 @@ def test_malformed_or_negative_host_transport_revokes(h, host_packet):
   assert h.allowed()
 
 
+def test_revocation_reason_and_gate_snapshot_are_observational(h):
+  h.engage()
+  before = h.safety.test_sp_gate_bits()
+  assert before == 0xFFFD  # every ready/authorization bit; host-clear is consumed
+
+  h.safety.safety_lateral_revoke(2)
+  assert not h.allowed()
+  assert h.safety.test_sp_reason() == 2
+  after = h.safety.test_sp_gate_bits()
+  assert not (after & (1 << 14))
+  assert before != after
+
+
+def test_non_lightning_diagnostics_default_to_zero():
+  h = Harness(lightning=False)
+  assert not h.safety.test_sp_enabled()
+  assert h.safety.test_sp_reason() == 0
+
+
 def test_negative_host_transport_is_required_clear_ack(h):
   h.safety.test_sp_heartbeat(0, 0, 0)
   assert not h.allowed()
@@ -260,7 +279,9 @@ def test_every_shared_revocation_requires_clear_then_fresh_host_intent(h, reason
   assert not h.allowed()
   if reason == 1:
     assert not h.safety.test_sp_enabled()
+    assert h.safety.test_sp_reason() == 0  # reset clears all diagnostic state
   else:
+    assert h.safety.test_sp_reason() == reason
     h.refresh()
     assert not h.allowed()
     h.safety.test_sp_heartbeat(0, 0, 0)

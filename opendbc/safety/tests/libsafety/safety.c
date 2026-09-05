@@ -40,13 +40,7 @@ bool test_sp_enabled(void) { return ford_sp_gate.enabled; }
 uint32_t test_sp_reason(void) { return ford_sp_gate.reason; }
 bool test_sp_ready(void) { return ford_sp_vehicle_ready(); }
 uint32_t test_sp_gate_bits(void) {
-  return ((uint32_t)ford_sp_gate.host_clear_seen << 0U) |
-         ((uint32_t)ford_sp_gate.platform_ready << 1U) |
-         ((uint32_t)ford_sp_gate.mode_ready << 2U) |
-         ((uint32_t)ford_sp_gate.main_on << 3U) |
-         ((uint32_t)ford_sp_gate.brake_ok << 4U) |
-         ((uint32_t)!safety_rx_checks_invalid << 5U) |
-         ((uint32_t)!steering_disengage << 6U);
+  return ford_sp_diagnostic_gate_bits();
 }
 bool test_sp_status_checksum(const CANPacket_t *msg) { return ford_sp_status_checksum_valid(msg); }
 bool test_sp_status_ready(void) { return ford_sp_status_ready(); }

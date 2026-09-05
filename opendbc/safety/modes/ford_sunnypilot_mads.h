@@ -39,6 +39,35 @@ static bool ford_sp_status_ready(void) {
          (safety_get_ts_elapsed(microsecond_timer_get(), ford_sp_gate.lateral_progress_ts) <= FORD_SP_STATUS_MAX_AGE_US);
 }
 
+// Read-only snapshot exported through panda health. These bits describe the
+// existing authorization inputs and never participate in the decision.
+static uint16_t ford_sp_diagnostic_gate_bits(void) {
+  bool rx_checks_valid = true;
+  for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
+    const RxCheck *check = &current_safety_config.rx_checks[i];
+    rx_checks_valid = rx_checks_valid && check->status.msg_seen && check->status.valid_checksum &&
+                      check->status.valid_quality_flag && !check->status.lagging &&
+                      (check->status.wrong_counters < MAX_WRONG_COUNTERS);
+  }
+  const bool speed_agrees = SAFETY_ABS(vehicle_speed.values[0] - vehicle_speed_2.values[0]) <= (2 * VEHICLE_SPEED_FACTOR);
+  return ((uint16_t)ford_sp_gate.enabled << 0U) |
+         ((uint16_t)ford_sp_gate.host_clear_seen << 1U) |
+         ((uint16_t)ford_sp_gate.platform_ready << 2U) |
+         ((uint16_t)ford_sp_gate.mode_ready << 3U) |
+         ((uint16_t)ford_sp_gate.lateral_ok << 4U) |
+         ((uint16_t)ford_sp_gate.lateral_progress_seen << 5U) |
+         ((uint16_t)ford_sp_status_ready() << 6U) |
+         ((uint16_t)ford_sp_gate.main_on << 7U) |
+         ((uint16_t)ford_sp_gate.brake_ok << 8U) |
+         ((uint16_t)speed_agrees << 9U) |
+         ((uint16_t)rx_checks_valid << 10U) |
+         ((uint16_t)!relay_malfunction << 11U) |
+         ((uint16_t)!safety_rx_checks_invalid << 12U) |
+         ((uint16_t)!steering_disengage << 13U) |
+         ((uint16_t)controls_allowed_lateral << 14U) |
+         ((uint16_t)heartbeat_engaged_mads << 15U);
+}
+
 static inline void ford_sp_set_board_check(bool (*check)(void)) {
   ford_sp_board_ready = check;
 }
@@ -68,7 +97,11 @@ static void ford_sp_revoke(lateral_revocation_reason reason) {
     if (was_authorized) {
       ford_sp_gate.host_clear_seen = false;
     }
-    ford_sp_gate.reason = (uint32_t)reason;
+    // Preserve the first cause of an authorization edge. Subsequent checks
+    // while already revoked must not obscure the actionable reason.
+    if (was_authorized) {
+      ford_sp_gate.reason = (uint32_t)reason;
+    }
     if (reason == LATERAL_REVOKE_RESET) {
       ford_sp_gate = (FordSunnyMadsGate){0};
     }
