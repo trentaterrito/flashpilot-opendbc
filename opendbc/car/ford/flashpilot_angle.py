@@ -83,6 +83,22 @@ _SOFT_ROC_BP = (9., 10., 15., 25.)
 _SOFT_ROC_V = (0.055, 0.055, 0.0425, 0.009)
 
 
+def limit_curvature_for_unwind(requested: float, measured: float, max_error: float) -> float:
+  """Keep added authority inside the measured-error envelope, while permitting
+  a command to shed existing curvature toward (but never through) zero.
+
+  Opposite-sign requests stop at zero until measured curvature enters the normal
+  error envelope. The separate path-angle ROC remains the per-frame actuator
+  bound, so this only removes the stale same-direction hold seen on curve exit.
+  """
+  limited = float(clip(requested, measured - max_error, measured + max_error))
+  if measured > max_error and requested < measured - max_error:
+    return float(max(0.0, requested))
+  if measured < -max_error and requested > measured + max_error:
+    return float(min(0.0, requested))
+  return limited
+
+
 def pscm_d_ref_m(v_ego_ms: float) -> float:
   v = max(float(v_ego_ms), 0.0)
   d = float(interp(v, _PSCM_DREF_SPEEDS_MS, _PSCM_DREF_M))
@@ -221,13 +237,13 @@ class FlashPilotAngleController:
     requested_curvature = float(actuators.curvature)
     kappa_cmd = requested_curvature
 
-    # Deviation clip: kappa_cmd may not lead the measured curvature by more than
-    # CarControllerParams.CURVATURE_ERROR, mirroring curvature-primary mode's own
-    # clip so the shadow-curvature panda check never rejects a legitimate command.
+    # Added same-direction authority remains inside the normal measured-curvature
+    # envelope. Reducing existing curvature may move toward zero faster, but an
+    # opposite-sign request stops at zero until it fits the normal envelope. The
+    # matched Panda rule enforces the same asymmetric, unwind-only allowance.
     current_curvature = self._current_curvature(CS)
     if v_ego > 9:
-      kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
-                             current_curvature + CarControllerParams.CURVATURE_ERROR))
+      kappa_cmd = limit_curvature_for_unwind(kappa_cmd, current_curvature, CarControllerParams.CURVATURE_ERROR)
     deviation_limited = abs(kappa_cmd - requested_curvature) > 1e-12
 
     curvature_factor = path_angle_curvature_factor(v_ego, kappa_cmd, self.low_speed_factor,

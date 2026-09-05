@@ -155,6 +155,18 @@ static bool fp_path_angle_cmd_checks(int desired_path_angle, bool steer_control_
     int highest = fp_desired_path_angle_last + delta;
     int lowest = fp_desired_path_angle_last - delta;
     violation |= safety_max_limit_check(desired_path_angle, highest, lowest);
+
+    // During the unwind-only shadow-curvature allowance below, independently
+    // keep the real actuator command on the measured side of zero until the
+    // vehicle returns to the ordinary curvature-error envelope. A faulty host
+    // therefore cannot advertise a neutral shadow while commanding a reversal.
+    if ((vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR) > FORD_STEERING_LIMITS.curvature_error_min_speed) {
+      if (curvature_state.meas.min > FORD_STEERING_LIMITS.max_curvature_error) {
+        violation |= desired_path_angle < 0;
+      } else if (curvature_state.meas.max < -FORD_STEERING_LIMITS.max_curvature_error) {
+        violation |= desired_path_angle > 0;
+      }
+    }
   }
   fp_desired_path_angle_last = desired_path_angle;
 
@@ -182,6 +194,15 @@ static bool fp_shadow_curvature_error_check(int shadow_curvature_can) {
   if (((vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR) > FORD_STEERING_LIMITS.curvature_error_min_speed)) {
     int lowest_allowed = curvature_state.meas.min - FORD_STEERING_LIMITS.max_curvature_error - 1;
     int highest_allowed = curvature_state.meas.max + FORD_STEERING_LIMITS.max_curvature_error + 1;
+    // Shedding existing curvature toward zero cannot add lateral authority. Extend
+    // only the measured-side bound to zero; crossing zero or increasing curvature
+    // remains inside the original error envelope. Path angle retains its own strict
+    // value and per-frame rate checks.
+    if (curvature_state.meas.min > 0) {
+      lowest_allowed = 0;
+    } else if (curvature_state.meas.max < 0) {
+      highest_allowed = 0;
+    }
     violation = safety_max_limit_check(shadow_curvature_can, highest_allowed, lowest_allowed);
   }
   return violation;

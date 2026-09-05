@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from opendbc.car import Bus, structs
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.carcontroller import CarController
-from opendbc.car.ford.flashpilot_angle import FlashPilotAngleController, path_angle_curvature_factor
+from opendbc.car.ford.flashpilot_angle import FlashPilotAngleController, limit_curvature_for_unwind, path_angle_curvature_factor
 from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 
 FORD_LateralMotionControl2 = 0x3D6
@@ -60,6 +60,18 @@ class TestFlashPilotAngleTuning(unittest.TestCase):
 
 
 class TestFlashPilotAngleTelemetry(unittest.TestCase):
+  def test_deviation_limit_allows_only_unwind_toward_zero(self):
+    error = CarControllerParams.CURVATURE_ERROR
+    # Reducing magnitude may leave the ordinary measured-error envelope.
+    self.assertEqual(limit_curvature_for_unwind(-0.0005, -0.006, error), -0.0005)
+    self.assertEqual(limit_curvature_for_unwind(0.0005, 0.006, error), 0.0005)
+    # An opposite request stops at zero until measured curvature catches up.
+    self.assertEqual(limit_curvature_for_unwind(0.002, -0.006, error), 0.0)
+    self.assertEqual(limit_curvature_for_unwind(-0.002, 0.006, error), 0.0)
+    # Increasing same-direction authority remains strictly clipped.
+    self.assertEqual(limit_curvature_for_unwind(-0.01, -0.006, error), -0.008)
+    self.assertEqual(limit_curvature_for_unwind(0.01, 0.006, error), 0.008)
+
   def test_deviation_and_path_angle_intermediates(self):
     controller = FlashPilotAngleController()
     CC = SimpleNamespace(latActive=True)

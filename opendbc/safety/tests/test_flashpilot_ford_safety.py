@@ -236,6 +236,44 @@ class TestFlashPilotFordPathAngleSafety(unittest.TestCase):
     self._engage_angle_mode(shadow_curvature_can=MAX_CURVATURE_ERROR * 4)
     self.assertFalse(self._tx(self._lat_ctl2_msg(True, path_angle=0.0, curvature=0)))
 
+  def test_angle_mode_shadow_curvature_allows_only_unwind_to_zero(self):
+    speed = CURVATURE_ERROR_MIN_SPEED + 5
+    scenarios = (
+      ("neutral", 0, True),
+      ("same-sign unwind", MAX_CURVATURE_ERROR, True),
+      ("cross zero", -1, False),
+      ("add authority", MAX_CURVATURE_ERROR * 7, False),
+    )
+
+    # A rejected TX intentionally revokes controls, so isolate every scenario in
+    # a fresh safety state rather than letting one expected rejection contaminate
+    # the next assertion.
+    for sign in (-1, 1):
+      for name, unsigned_shadow, expected in scenarios:
+        with self.subTest(sign=sign, scenario=name):
+          self.setUp()
+          self.safety.set_controls_allowed(True)
+          measured = sign * MAX_CURVATURE_ERROR * 4
+          self._reset_curvature_measurement(measured / DEG_TO_CAN, speed)
+          shadow = unsigned_shadow if name == "neutral" else sign * unsigned_shadow
+          self._engage_angle_mode(shadow_curvature_can=shadow)
+          self.assertEqual(self._tx(self._lat_ctl2_msg(True, path_angle=0.0, curvature=0)), expected)
+
+  def test_angle_mode_unwind_rejects_path_angle_crossing_zero(self):
+    speed = CURVATURE_ERROR_MIN_SPEED + 5
+    measured_can = MAX_CURVATURE_ERROR * 4
+
+    for sign in (-1, 1):
+      for path_angle, expected in ((sign * 0.001, True), (-sign * 0.001, False)):
+        with self.subTest(sign=sign, path_angle=path_angle):
+          self.setUp()
+          self.safety.set_controls_allowed(True)
+          self._reset_curvature_measurement(sign * measured_can / DEG_TO_CAN, speed)
+          # A neutral shadow is legal while shedding curvature, but the actuator
+          # itself must remain on the measured side of zero outside the envelope.
+          self._engage_angle_mode(shadow_curvature_can=0)
+          self.assertEqual(self._tx(self._lat_ctl2_msg(True, path_angle=path_angle, curvature=0)), expected)
+
   def test_angle_mode_shadow_curvature_check_skipped_below_min_speed(self):
     """Below curvature_error_min_speed, the deviation check must not fire (matches
     curvature-primary mode's own existing behavior at low speed)."""
