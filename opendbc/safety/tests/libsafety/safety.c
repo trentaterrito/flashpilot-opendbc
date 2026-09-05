@@ -39,6 +39,7 @@ bool test_sp_authorized(void) {
 bool test_sp_enabled(void) { return ford_sp_gate.enabled; }
 uint32_t test_sp_reason(void) { return ford_sp_gate.reason; }
 bool test_sp_ready(void) { return ford_sp_vehicle_ready(); }
+int test_fp_accepted_path_angle(void) { return fp_accepted_path_angle_last; }
 uint32_t test_sp_gate_bits(void) {
   return ford_sp_diagnostic_gate_bits();
 }

@@ -66,6 +66,7 @@ bool test_sp_authorized(void);
 bool test_sp_enabled(void);
 uint32_t test_sp_reason(void);
 bool test_sp_ready(void);
+int test_fp_accepted_path_angle(void);
 uint32_t test_sp_gate_bits(void);
 bool test_sp_status_checksum(const CANPacket_t *msg);
 bool test_sp_status_ready(void);

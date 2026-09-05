@@ -274,6 +274,63 @@ class TestFlashPilotFordPathAngleSafety(unittest.TestCase):
           self._engage_angle_mode(shadow_curvature_can=0)
           self.assertEqual(self._tx(self._lat_ctl2_msg(True, path_angle=path_angle, curvature=0)), expected)
 
+  def test_unwind_preserves_original_envelope_near_zero(self):
+    for sign in (-1, 1):
+      with self.subTest(sign=sign):
+        self.setUp()
+        self.safety.set_controls_allowed(True)
+        self._reset_curvature_measurement(sign * 0.001, 15.)
+        self._engage_angle_mode(shadow_curvature_can=-sign * 25)
+        self.assertTrue(self._tx(self._lat_ctl2_msg(True, path_angle=-sign * 0.0072)))
+
+  def _prepare_opposite_path_history(self, sign):
+    self.setUp()
+    self.safety.set_controls_allowed(True)
+    self._reset_curvature_measurement(sign * 0.006, 25.)
+    self._engage_angle_mode(shadow_curvature_can=sign * 300)
+    for i in range(11):
+      self.assertTrue(self._tx(self._lat_ctl2_msg(True, path_angle=sign * i * 0.01)))
+    self._reset_curvature_measurement(-sign * 0.006, 25.)
+    self._engage_angle_mode(shadow_curvature_can=0)
+
+  def test_existing_opposite_path_can_only_release(self):
+    for sign in (-1, 1):
+      for action in ('release', 'hold', 'increase', 'rate_jump'):
+        with self.subTest(sign=sign, action=action):
+          self._prepare_opposite_path_history(sign)
+          self.assertTrue(self._tx(self._lat_ctl2_msg(True, path_angle=sign * 0.09)))
+          target = {'release':0.08, 'hold':0.09, 'increase':0.10, 'rate_jump':0.01}[action]
+          self.assertEqual(self._tx(self._lat_ctl2_msg(True, path_angle=sign * target)), action == 'release')
+
+  def test_release_history_is_cleared_after_rejection_or_reset(self):
+    for sign in (-1, 1):
+      for action in ('shadow', 'wrong_bus', 'wrong_length', 'relay', 'revoke', 'inactive', 'mode_off'):
+        with self.subTest(sign=sign, action=action):
+          self._prepare_opposite_path_history(sign)
+          if action == 'shadow':
+            self._engage_angle_mode(shadow_curvature_can=sign * 1000)
+            self.assertFalse(self._tx(self._lat_ctl2_msg(True, path_angle=sign * 0.09)))
+            self._engage_angle_mode(shadow_curvature_can=0)
+          elif action == 'wrong_bus':
+            msg = self._lat_ctl2_msg(True, path_angle=sign * 0.09)
+            msg[0].bus = 1
+            self.assertFalse(self._tx(msg))
+          elif action == 'wrong_length':
+            self.assertFalse(self._tx(libsafety_py.make_CANPacket(MSG_LateralMotionControl2, 0, b'\x00' * 4)))
+          elif action == 'relay':
+            self.safety.set_relay_malfunction(True)
+            self.assertFalse(self._tx(self._lat_ctl2_msg(True, path_angle=sign * 0.09)))
+            self.safety.set_relay_malfunction(False)
+          elif action == 'revoke':
+            self.safety.safety_lateral_revoke(12)  # host revocation
+          elif action == 'inactive':
+            self.assertTrue(self._tx(self._lat_ctl2_msg(False, path_angle=0)))
+          else:
+            self._disengage_angle_mode()
+            self._engage_angle_mode(shadow_curvature_can=0)
+          self.safety.set_controls_allowed(True)  # Unit precondition, not vehicle authorization.
+          self.assertFalse(self._tx(self._lat_ctl2_msg(True, path_angle=sign * 0.08)))
+
   def test_angle_mode_shadow_curvature_check_skipped_below_min_speed(self):
     """Below curvature_error_min_speed, the deviation check must not fire (matches
     curvature-primary mode's own existing behavior at low speed)."""

@@ -137,6 +137,34 @@ static int ford_fp_shadow_curvature_to_can(int16_t raw) {
 }
 
 static int fp_desired_path_angle_last = 0;
+// Release permission must be based on accepted commands, never a rejected TX.
+static int fp_accepted_path_angle_last = 0;
+
+static void ford_fp_lateral_revoke(lateral_revocation_reason reason) {
+  // The outer TX wrapper can reject after ford_tx_hook (relay) or without
+  // calling it (wrong bus/length). Such failures must invalidate release history.
+  // Preserve intentional brake/regen retention of independent lateral control.
+  const bool retained = ford_sp_gate.enabled && controls_allowed_lateral &&
+                        ((reason == LATERAL_REVOKE_BRAKE) || (reason == LATERAL_REVOKE_REGEN));
+  if (!retained) {
+    fp_accepted_path_angle_last = 0;
+  }
+  ford_sp_revoke(reason);
+}
+
+static void ford_fp_lateral_check(void) {
+  ford_sp_check();
+  if (ford_sp_gate.enabled && !controls_allowed_lateral) {
+    fp_accepted_path_angle_last = 0;
+  }
+}
+
+static void ford_fp_lateral_rx(const CANPacket_t *msg, bool valid) {
+  ford_sp_rx(msg, valid);
+  if (ford_sp_gate.enabled && !controls_allowed_lateral) {
+    fp_accepted_path_angle_last = 0;
+  }
+}
 
 // Dedicated, narrow rate-of-change check for path_angle. Deliberately NOT the shared
 // steer_angle_cmd_checks(): that function's inactive/reset logic clamps against the
@@ -156,15 +184,17 @@ static bool fp_path_angle_cmd_checks(int desired_path_angle, bool steer_control_
     int lowest = fp_desired_path_angle_last - delta;
     violation |= safety_max_limit_check(desired_path_angle, highest, lowest);
 
-    // During the unwind-only shadow-curvature allowance below, independently
-    // keep the real actuator command on the measured side of zero until the
-    // vehicle returns to the ordinary curvature-error envelope. A faulty host
-    // therefore cannot advertise a neutral shadow while commanding a reversal.
+    // Do not establish or grow an opposite-side command outside the normal
+    // envelope. If the measurement changes sign before the rate-limited command
+    // reaches zero, allow only strict release of the previously accepted command.
+    // Holding, growing, and starting an opposite-side command still fail closed.
     if ((vehicle_speed.values[0] / VEHICLE_SPEED_FACTOR) > FORD_STEERING_LIMITS.curvature_error_min_speed) {
       if (curvature_state.meas.min > FORD_STEERING_LIMITS.max_curvature_error) {
-        violation |= desired_path_angle < 0;
+        violation |= (desired_path_angle < 0) && !((fp_accepted_path_angle_last < desired_path_angle) &&
+                                                  (fp_accepted_path_angle_last < 0));
       } else if (curvature_state.meas.max < -FORD_STEERING_LIMITS.max_curvature_error) {
-        violation |= desired_path_angle > 0;
+        violation |= (desired_path_angle > 0) && !((fp_accepted_path_angle_last > desired_path_angle) &&
+                                                  (fp_accepted_path_angle_last > 0));
       }
     }
   }
@@ -199,9 +229,9 @@ static bool fp_shadow_curvature_error_check(int shadow_curvature_can) {
     // remains inside the original error envelope. Path angle retains its own strict
     // value and per-frame rate checks.
     if (curvature_state.meas.min > 0) {
-      lowest_allowed = 0;
+      lowest_allowed = SAFETY_MIN(lowest_allowed, 0);
     } else if (curvature_state.meas.max < 0) {
-      highest_allowed = 0;
+      highest_allowed = SAFETY_MAX(highest_allowed, 0);
     }
     violation = safety_max_limit_check(shadow_curvature_can, highest_allowed, lowest_allowed);
   }
@@ -354,6 +384,9 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     // depends on it. Not a safety-relevant field itself -- always readable regardless
     // of the `action != 0U` block above, since that's an independent violation.
     fp_angle_mode_engaged = (msg->data[4] & 0x1U) != 0U;
+    if (!fp_angle_mode_engaged) {
+      fp_accepted_path_angle_last = 0;
+    }
     uint16_t fp_shadow_raw_u = ((uint16_t)msg->data[5] << 8) | (uint16_t)msg->data[6];
     fp_shadow_curvature_raw = (int16_t)fp_shadow_raw_u;
     if (ford_sp_gate.enabled) {
@@ -448,6 +481,13 @@ static bool ford_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  if (msg->addr == FORD_LateralMotionControl2) {
+    const int accepted_path = (((msg->data[3] & 0x1FU) << 6) | (msg->data[4] >> 2)) - FORD_INACTIVE_PATH_ANGLE;
+    const bool active = ((msg->data[0] >> 4) & 0x7U) != 0U;
+    // After every Ford LMC2 check, including shadow validity. Rejected or inactive
+    // commands cannot establish history for a later release exception.
+    fp_accepted_path_angle_last = (tx && fp_angle_mode_engaged && active) ? accepted_path : 0;
+  }
   return tx;
 }
 
@@ -461,6 +501,7 @@ static safety_config ford_init(uint16_t param) {
   fp_angle_mode_engaged = false;
   fp_shadow_curvature_raw = 0;
   fp_desired_path_angle_last = 0;
+  fp_accepted_path_angle_last = 0;
 
   // warning: quality flags are not yet checked in openpilot's CAN parser,
   // this may be the cause of blocked messages
@@ -536,7 +577,7 @@ const safety_hooks ford_hooks = {
   .get_checksum = ford_get_checksum,
   .compute_checksum = ford_compute_checksum,
   .get_quality_flag_valid = ford_get_quality_flag_valid,
-  .lateral_revoke = ford_sp_revoke,
-  .lateral_check = ford_sp_check,
-  .lateral_rx = ford_sp_rx,
+  .lateral_revoke = ford_fp_lateral_revoke,
+  .lateral_check = ford_fp_lateral_check,
+  .lateral_rx = ford_fp_lateral_rx,
 };
