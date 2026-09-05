@@ -459,6 +459,25 @@ struct CarOutput {
   # the CarController are reflected in actuatorsOutput
   # and matches what is sent to the car
   actuatorsOutput @0 :CarControl.Actuators;
+
+  struct FordLateralTelemetry {
+    active @0 :Bool;
+    wireMode @1 :UInt8;
+    requestedCurvature @2 :Float32;
+    deviationLimitedCurvature @3 :Float32;
+    calculatedPathAngle @4 :Float32;
+    finalPathAngle @5 :Float32;
+    shadowCurvature @6 :Float32;
+    deviationLimited @7 :Bool;
+    pscmSaturationLimited @8 :Bool;
+    rangeLimited @9 :Bool;
+    rateLimited @10 :Bool;
+    humanTurnActive @11 :Bool;
+  }
+
+  # Read-only Ford path-angle diagnostics. Defaults remain zero/false on all
+  # platforms that do not instantiate FlashPilot's Lightning angle controller.
+  fordLateralTelemetry @1 :FordLateralTelemetry;
 }
 
 # ****** car param ******

@@ -12,9 +12,10 @@ from collections import defaultdict
 from types import SimpleNamespace
 
 from opendbc.car import Bus, structs
+from opendbc.car.ford import fordcan
 from opendbc.car.ford.carcontroller import CarController
 from opendbc.car.ford.flashpilot_angle import FlashPilotAngleController, path_angle_curvature_factor
-from opendbc.car.ford.values import CAR, DBC, FordFlags
+from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 
 FORD_LateralMotionControl2 = 0x3D6
 FORD_Lane_Assist_Data1 = 0x3CA
@@ -56,6 +57,56 @@ class TestFlashPilotAngleTuning(unittest.TestCase):
     self.assertEqual(controller.low_speed_factor, 1.5)
     self.assertEqual(controller.high_speed_factor, 0.5)
     self.assertEqual(controller.high_speed_low_curve_factor, 1.25)
+
+
+class TestFlashPilotAngleTelemetry(unittest.TestCase):
+  def test_deviation_and_path_angle_intermediates(self):
+    controller = FlashPilotAngleController()
+    CC = SimpleNamespace(latActive=True)
+    CS = _make_cs(v_ego=20.0, yaw_rate=0.0)
+    actuators = SimpleNamespace(curvature=0.01)
+
+    result = controller.update(CC, CS, actuators)
+
+    self.assertEqual(result.requested_curvature, 0.01)
+    self.assertTrue(result.deviation_limited)
+    self.assertAlmostEqual(result.deviation_limited_curvature, CarControllerParams.CURVATURE_ERROR)
+    expected_angle = (result.deviation_limited_curvature * 20.0 *
+                      path_angle_curvature_factor(20.0, result.deviation_limited_curvature))
+    self.assertAlmostEqual(result.calculated_path_angle, expected_angle)
+    self.assertTrue(result.rate_limited)
+    self.assertFalse(result.pscm_saturation_limited)
+    self.assertFalse(result.range_limited)
+
+  def test_range_and_pscm_limit_flags_report_actual_changes(self):
+    controller = FlashPilotAngleController()
+    CC = SimpleNamespace(latActive=True)
+    actuators = SimpleNamespace(curvature=0.1)
+    # Matching measured curvature prevents the deviation limiter obscuring the
+    # deliberately out-of-range raw path-angle request.
+    CS = _make_cs(v_ego=20.0, yaw_rate=-2.0)
+    ranged = controller.update(CC, CS, actuators)
+    self.assertTrue(ranged.range_limited)
+    self.assertFalse(ranged.pscm_saturation_limited)
+
+    controller.path_angle_last = 0.48
+    saturated = controller.update(CC, CS, actuators)
+    self.assertTrue(saturated.saturated)
+    self.assertTrue(saturated.pscm_saturation_limited)
+    self.assertFalse(saturated.range_limited)
+    self.assertEqual(saturated.path_angle, 0.48)
+
+  def test_schema_round_trip(self):
+    output = structs.car.CarOutput.new_message()
+    output.fordLateralTelemetry.active = True
+    output.fordLateralTelemetry.wireMode = 1
+    output.fordLateralTelemetry.requestedCurvature = 0.01
+    output.fordLateralTelemetry.deviationLimited = True
+    with structs.car.CarOutput.from_bytes(output.to_bytes()) as decoded:
+      self.assertTrue(decoded.fordLateralTelemetry.active)
+      self.assertEqual(decoded.fordLateralTelemetry.wireMode, 1)
+      self.assertAlmostEqual(decoded.fordLateralTelemetry.requestedCurvature, 0.01)
+      self.assertTrue(decoded.fordLateralTelemetry.deviationLimited)
 
 
 def _make_controller(fingerprint):
@@ -191,6 +242,21 @@ class TestFlashPilotAngleGate(unittest.TestCase):
     angle_mode_engaged, shadow_curvature_raw = _decode_lka_extra(lka)
     self.assertTrue(angle_mode_engaged)
     self.assertNotEqual(shadow_curvature_raw, 0, "shadow_curvature should track the nonzero commanded curvature")
+
+  def test_telemetry_final_values_match_can_bytes(self):
+    """Instrumentation is observational: CAN is still built from the exact same
+    result fields, with the established internal-to-wire sign conversion."""
+    os.environ['FLASHPILOT_ANGLE_ENABLED'] = '1'
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1)
+    with _make_cc_reader(curvature=0.01, lat_active=True) as CC:
+      _, can_sends = cc.update(CC, _make_cs(v_ego=20.0), 0)
+
+    actual = next(msg for msg in can_sends if msg[0] == FORD_LateralMotionControl2)
+    telemetry = cc.ford_lateral_telemetry
+    expected = fordcan.create_lat_ctl2_msg(
+      cc.packer, cc.CAN, telemetry.mode, -telemetry.path_offset, -telemetry.path_angle, 0.0,
+      -telemetry.curvature_rate, 0, ramp_type=telemetry.ramp_type, precision_type=telemetry.precision_type)
+    self.assertEqual(actual, expected)
 
   def test_lightning_enabled_inactive_sends_mode_zero(self):
     """latActive=False must still produce mode 0 / all-zero signals in angle mode,

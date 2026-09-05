@@ -147,12 +147,17 @@ class FlashPilotAngleResult:
   module docstring. `mode` is the raw LatCtl_D2_Rq value (0=inactive, 1=active)."""
   __slots__ = ("mode", "path_angle", "path_offset", "curvature_rate", "ramp_type",
                "precision_type", "shadow_curvature", "human_turn_active", "saturated",
-               "rate_limited")
+               "rate_limited", "requested_curvature", "deviation_limited_curvature",
+               "calculated_path_angle", "deviation_limited", "pscm_saturation_limited",
+               "range_limited")
 
   def __init__(self, mode: int = 0, path_angle: float = 0.0, path_offset: float = 0.0,
                curvature_rate: float = 0.0, ramp_type: int = 0, precision_type: int = 1,
                shadow_curvature: float = 0.0, human_turn_active: bool = False,
-               saturated: bool = False, rate_limited: bool = False):
+               saturated: bool = False, rate_limited: bool = False,
+               requested_curvature: float = 0.0, deviation_limited_curvature: float = 0.0,
+               calculated_path_angle: float = 0.0, deviation_limited: bool = False,
+               pscm_saturation_limited: bool = False, range_limited: bool = False):
     self.mode = mode
     self.path_angle = path_angle
     self.path_offset = path_offset
@@ -163,6 +168,12 @@ class FlashPilotAngleResult:
     self.human_turn_active = human_turn_active
     self.saturated = saturated
     self.rate_limited = rate_limited
+    self.requested_curvature = requested_curvature
+    self.deviation_limited_curvature = deviation_limited_curvature
+    self.calculated_path_angle = calculated_path_angle
+    self.deviation_limited = deviation_limited
+    self.pscm_saturation_limited = pscm_saturation_limited
+    self.range_limited = range_limited
 
 
 class FlashPilotAngleController:
@@ -207,7 +218,8 @@ class FlashPilotAngleController:
       return FlashPilotAngleResult(mode=0, human_turn_active=True,
                                     shadow_curvature=self._current_curvature(CS))
 
-    kappa_cmd = float(actuators.curvature)
+    requested_curvature = float(actuators.curvature)
+    kappa_cmd = requested_curvature
 
     # Deviation clip: kappa_cmd may not lead the measured curvature by more than
     # CarControllerParams.CURVATURE_ERROR, mirroring curvature-primary mode's own
@@ -216,6 +228,7 @@ class FlashPilotAngleController:
     if v_ego > 9:
       kappa_cmd = float(clip(kappa_cmd, current_curvature - CarControllerParams.CURVATURE_ERROR,
                              current_curvature + CarControllerParams.CURVATURE_ERROR))
+    deviation_limited = abs(kappa_cmd - requested_curvature) > 1e-12
 
     curvature_factor = path_angle_curvature_factor(v_ego, kappa_cmd, self.low_speed_factor,
                                                    self.high_speed_factor, self.high_speed_low_curve_factor)
@@ -223,12 +236,14 @@ class FlashPilotAngleController:
     d_ref = pscm_d_ref_m(v_ego)  # noqa: F841 -- geometry documented for reference; the
     # gain-table form above (ported from lateral_angle_ext.py) is what's actually applied.
     path_angle = kappa_cmd * v_ego * curvature_factor
+    calculated_path_angle = path_angle
 
     # PSCM saturation clamp: a function of our own tracked path_angle_last only --
     # no PSCM signal is read (LatCtlLim_D_Stat does not fire in angle mode; see
     # docs/flashpilot/FLASHPILOT_PATH_ANGLE_PHASE_A.md item 5).
     dbc_sat = (self.path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
                self.path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
+    path_angle_pre_pscm = path_angle
     if dbc_sat:
       last_mag = abs(self.path_angle_last)
       curr_mag = abs(path_angle)
@@ -237,8 +252,11 @@ class FlashPilotAngleController:
       elif last_mag - curr_mag > _PSCM_SAT_UNWIND_RATE:
         limited_mag = last_mag - _PSCM_SAT_UNWIND_RATE
         path_angle = limited_mag if self.path_angle_last >= 0 else -limited_mag
+    pscm_saturation_limited = abs(path_angle - path_angle_pre_pscm) > 1e-12
 
+    path_angle_pre_range = path_angle
     path_angle = float(clip(path_angle, FORD_DBC_PATH_ANGLE_MIN, FORD_DBC_PATH_ANGLE_MAX))
+    range_limited = abs(path_angle - path_angle_pre_range) > 1e-12
 
     soft_roc = float(interp(v_ego, _SOFT_ROC_BP, _SOFT_ROC_V))
     path_angle_pre_roc = path_angle
@@ -258,4 +276,7 @@ class FlashPilotAngleController:
       mode=1, path_angle=path_angle, path_offset=0.0, curvature_rate=0.0,
       ramp_type=2, precision_type=1, shadow_curvature=shadow_curvature,
       human_turn_active=False, saturated=dbc_sat, rate_limited=rate_limited,
+      requested_curvature=requested_curvature, deviation_limited_curvature=kappa_cmd,
+      calculated_path_angle=calculated_path_angle, deviation_limited=deviation_limited,
+      pscm_saturation_limited=pscm_saturation_limited, range_limited=range_limited,
     )

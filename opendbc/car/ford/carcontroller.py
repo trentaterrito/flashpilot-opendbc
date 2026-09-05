@@ -67,6 +67,7 @@ class CarController(CarControllerBase):
     # (mirrors BluePilot's own angle_mode_engaged semantics).
     self._fp_angle_mode_engaged = self.flashpilot_angle is not None
     self._fp_shadow_curvature = 0.0
+    self.ford_lateral_telemetry = None
 
   @property
   def _ford_hands_free_cluster(self):
@@ -110,6 +111,7 @@ class CarController(CarControllerBase):
         # MUST be negated before packing -- see flashpilot_angle.py's module
         # docstring for the real hardware bug this guards against.
         fp = self.flashpilot_angle.update(CC, CS, actuators)
+        self.ford_lateral_telemetry = fp
         self.apply_curvature_last = 0.0
         self._fp_shadow_curvature = fp.shadow_curvature
         counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
