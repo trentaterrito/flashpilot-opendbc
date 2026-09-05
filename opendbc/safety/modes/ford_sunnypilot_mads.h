@@ -41,7 +41,7 @@ static bool ford_sp_status_ready(void) {
 
 // Read-only snapshot exported through panda health. These bits describe the
 // existing authorization inputs and never participate in the decision.
-static uint16_t ford_sp_diagnostic_gate_bits(void) {
+static inline uint16_t ford_sp_diagnostic_gate_bits(void) {
   bool rx_checks_valid = true;
   for (int i = 0; i < current_safety_config.rx_checks_len; i++) {
     const RxCheck *check = &current_safety_config.rx_checks[i];
