@@ -2,7 +2,7 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
+from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
 
 ButtonType = structs.CarState.ButtonEvent.Type
@@ -122,7 +122,12 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_can_parsers(CP):
+    cam_messages = [("IPMA_Data", 1)] if CP.carFingerprint == CAR.FORD_F_150_LIGHTNING_MK1 else []
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).main),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
+      # IPMA_Data arrives in bursts on the F-150 Lightning, with observed gaps
+      # near one second. Do not dynamically learn the intra-burst rate and then
+      # invalidate the entire car interface between bursts. It is consumed only
+      # as the stock LKAS UI passthrough payload, which we transmit at 1 Hz.
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, CanBus(CP).camera),
     }

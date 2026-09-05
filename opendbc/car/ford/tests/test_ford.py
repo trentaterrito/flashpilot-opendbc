@@ -1,7 +1,9 @@
 import random
 import unittest
 
+from opendbc.car import Bus
 from opendbc.car.structs import CarParams
+from opendbc.car.ford.carstate import CarState
 from opendbc.car.fw_versions import build_fw_dict, match_fw_to_car
 from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
@@ -39,6 +41,13 @@ ECU_PART_NUMBER = {
 
 
 class TestFordFW(unittest.TestCase):
+  def test_lightning_ipma_bursty_rate_is_explicit(self):
+    cp = CarParams(carFingerprint=CAR.FORD_F_150_LIGHTNING_MK1)
+    parsers = CarState.get_can_parsers(cp)
+    ipma = parsers[Bus.cam].message_states[0x3D8]
+    assert ipma.frequency == 1
+    assert ipma.timeout_threshold == 10_000_000_000
+
   def test_fw_query_config(self):
     for (ecu, addr, subaddr) in FW_QUERY_CONFIG.extra_ecus:
       assert ecu in ECU_ADDRESSES, "Unknown ECU"
