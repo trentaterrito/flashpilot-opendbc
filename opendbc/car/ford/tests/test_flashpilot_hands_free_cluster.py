@@ -97,7 +97,17 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
           sends = _run(cc, lat_active=lat, long_active=long, steer_alert=alert)
           self.assertEqual(self._hands_off_value(sends, cc), 1 if alert else 0)
           outputs.append(sends)
-        self.assertEqual(outputs[0], outputs[1])
+        for off, on in zip(*outputs, strict=True):
+          self.assertEqual(off[0], on[0])
+          self.assertEqual(off[2], on[2])
+          if on[0] == 0x18A:
+            expected = 7 if lat and long and not alert else (2 if lat else 0)
+            self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", on[1]), expected)
+            masked = bytearray(on[1])
+            masked[5] = (masked[5] & ~0x1c) | (off[1][5] & 0x1c)
+            self.assertEqual(bytes(masked), off[1])
+          else:
+            self.assertEqual(off, on)
 
   def _hands_off_value(self, can_sends, cc):
     dat = _find_msg(can_sends, FORD_IPMA_Data)
@@ -157,6 +167,22 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
     _run(cc, lat_active=True, long_active=False, steer_alert=False, frames=1)
     sends = _run(cc, lat_active=True, long_active=True, steer_alert=False, frames=1)
     self.assertEqual(self._hands_off_value(sends, cc), 0)
+    self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", _find_msg(sends, 0x18A)), 7)
+    sends = _run(cc, lat_active=True, long_active=False, steer_alert=False, frames=1)
+    self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", _find_msg(sends, 0x18A)), 2)
+
+  def test_departure_priority_and_canfd_gate(self):
+    for left, right, expected in [(True, False, 3), (False, True, 4), (False, False, 7)]:
+      cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
+      builder = structs.CarControl(latActive=True, longActive=True,
+                                  hudControl=structs.CarControl.HUDControl(leftLaneDepart=left, rightLaneDepart=right))
+      with structs.CarControl.from_bytes(builder.to_bytes()) as CC:
+        _, sends = cc.update(CC, _make_cs(), 0)
+      self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", _find_msg(sends, 0x18A)), expected)
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1, hands_free_cluster=True)
+    cc.CP.flags = int(cc.CP.flags & ~FordFlags.CANFD)
+    sends = _run(cc, True, False)
+    self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", _find_msg(sends, 0x18A)), 2)
 
   def test_toggle_on_steer_alert_wins_is_1(self):
     """5. Toggle ON + steering alert: value 1, alert wins over hands-free display."""
@@ -174,6 +200,7 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
         self.assertFalse(cc._ford_hands_free_cluster, f"{car} must never honor HANDS_FREE_CLUSTER")
         sends = _run(cc, lat_active=True, steer_alert=False)
         self.assertEqual(self._hands_off_value(sends, cc), 0)
+        self.assertEqual(_get_signal(cc.packer, 0x18A, "Tja_D_Stat", _find_msg(sends, 0x18A)), 2)
         sends = _run(cc, lat_active=True, steer_alert=True)
         self.assertEqual(self._hands_off_value(sends, cc), 1)
 
@@ -211,6 +238,11 @@ class TestFlashPilotFordHandsFreeCluster(unittest.TestCase):
       with self.subTest(i=i, addr=hex(addr_off)):
         self.assertEqual(addr_off, addr_on)
         self.assertEqual(bus_off, bus_on)
+        if addr_off == 0x18A:
+          corrected = bytearray(dat_on)
+          corrected[5] = (corrected[5] & ~0x1c) | (dat_off[5] & 0x1c)
+          self.assertEqual(bytes(corrected), dat_off)
+          continue
         self.assertEqual(dat_off, dat_on, f"message {hex(addr_off)} must be byte-identical regardless of the toggle")
 
   def test_param_unset_matches_off(self):
