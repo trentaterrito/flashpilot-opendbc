@@ -309,6 +309,14 @@ FW_QUERY_CONFIG = FwQueryConfig(
       bus=0,
       logging=True,
     ) for block_id, ecus in ASBUILT_BLOCKS],
+    # ABS/EPS can answer F188 even when tester-present receives no reply.
+    # Collect a fresh version through the same bus/DID; all matching rules remain unchanged.
+    Request(
+      [StdQueries.MANUFACTURER_SOFTWARE_VERSION_REQUEST],
+      [StdQueries.MANUFACTURER_SOFTWARE_VERSION_RESPONSE],
+      whitelist_ecus=[Ecu.abs, Ecu.eps],
+      bus=0,
+    ),
   ],
   extra_ecus=[
     (Ecu.engine, 0x7e0, None),        # Powertrain Control Module
