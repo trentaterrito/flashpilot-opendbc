@@ -10,11 +10,13 @@ import os
 import unittest
 from collections import defaultdict
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from opendbc.car import Bus, structs
 from opendbc.car.ford import fordcan
 from opendbc.car.ford.carcontroller import CarController
-from opendbc.car.ford.flashpilot_angle import FlashPilotAngleController, limit_curvature_for_unwind, path_angle_curvature_factor
+from opendbc.car.ford.flashpilot_angle import (FlashPilotAngleController, FlashPilotAngleResult, ManualTurnState,
+                                               limit_curvature_for_unwind, path_angle_curvature_factor)
 from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 
 FORD_LateralMotionControl2 = 0x3D6
@@ -127,9 +129,12 @@ def _make_controller(fingerprint):
   return CarController(dbc_names, CP)
 
 
-def _make_cs(v_ego=0.0, yaw_rate=0.0, steering_pressed=False, steering_angle_deg=0.0):
+def _make_cs(v_ego=0.0, yaw_rate=0.0, steering_pressed=False, steering_angle_deg=0.0,
+             steering_torque=0.0, can_valid=True, steer_fault_temporary=False, steer_fault_permanent=False):
   cs_out = structs.CarState(vEgoRaw=v_ego, yawRate=yaw_rate, steeringPressed=steering_pressed,
-                             steeringAngleDeg=steering_angle_deg)
+                             steeringAngleDeg=steering_angle_deg, steeringTorque=steering_torque,
+                             canValid=can_valid, steerFaultTemporary=steer_fault_temporary,
+                             steerFaultPermanent=steer_fault_permanent)
   return SimpleNamespace(out=cs_out, buttons_stock_values=defaultdict(int),
                           acc_tja_status_stock_values=defaultdict(int), lkas_status_stock_values=defaultdict(int))
 
@@ -265,8 +270,9 @@ class TestFlashPilotAngleGate(unittest.TestCase):
 
     actual = next(msg for msg in can_sends if msg[0] == FORD_LateralMotionControl2)
     telemetry = cc.ford_lateral_telemetry
+    wire_path_angle = max(-0.5, min(0.5235, -telemetry.path_angle))
     expected = fordcan.create_lat_ctl2_msg(
-      cc.packer, cc.CAN, telemetry.mode, -telemetry.path_offset, -telemetry.path_angle, 0.0,
+      cc.packer, cc.CAN, telemetry.mode, -telemetry.path_offset, wire_path_angle, 0.0,
       -telemetry.curvature_rate, 0, ramp_type=telemetry.ramp_type, precision_type=telemetry.precision_type)
     self.assertEqual(actual, expected)
 
@@ -284,28 +290,117 @@ class TestFlashPilotAngleGate(unittest.TestCase):
     self.assertEqual(raw_curvature, 1000)
     self.assertEqual(raw_path_angle, 1000)
 
-  def test_lightning_enabled_human_turn_forces_mode_zero(self):
-    """Sustained driver override at a large wheel angle must force mode 0, not a
-    wound-up path_angle command."""
+  def test_wire_endpoint_clamp_prevents_wrap(self):
+    """Both wire endpoints and the demonstrated Route16 overflow pack exactly."""
     os.environ['FLASHPILOT_ANGLE_ENABLED'] = '1'
     cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1)
-    # ramp up steering first
-    for _ in range(20):
-      with _make_cc_reader(curvature=0.01, lat_active=True) as CC:
-        cc.update(CC, _make_cs(v_ego=20.0), 0)
-    # driver grabs the wheel hard for > 3.0s (wheel already past 45 deg at contact -> preturned
-    # hold). The detector only advances once per STEER_STEP=5 cc.update() calls (0.05s/advance),
-    # so >3.0s needs >300 calls, not >60 -- comfortably clear that with 400.
-    # LMC2 is sent every STEER_STEP frames, not every call -- accumulate across the hold.
+    cases = ((0.500626862, 0), (0.5, 0), (-0.5235, 2047), (-0.5240, 2047))
+    for internal_angle, expected_raw in cases:
+      fp = FlashPilotAngleResult(mode=1, path_angle=internal_angle)
+      with patch.object(cc.flashpilot_angle, 'update', return_value=fp):
+        # Advance to the next 20 Hz steering frame.
+        while cc.frame % CarControllerParams.STEER_STEP:
+          with _make_cc_reader(curvature=0.0, lat_active=True) as CC:
+            cc.update(CC, _make_cs(v_ego=8.0), 0)
+        with _make_cc_reader(curvature=0.0, lat_active=True) as CC:
+          _, sends = cc.update(CC, _make_cs(v_ego=8.0), 0)
+      mode, _, raw_path_angle = _decode_lmc2(_find_msg(sends, FORD_LateralMotionControl2))
+      self.assertEqual(mode, 1)
+      self.assertEqual(raw_path_angle, expected_raw)
+
+  def test_manual_turn_yield_and_state_based_reacquisition(self):
+    controller = FlashPilotAngleController()
+    CC = SimpleNamespace(latActive=True)
+    actuators = SimpleNamespace(curvature=0.1)
+
+    # Five 20 Hz samples span 0.20 s. The driver supplies >1.5 Nm and moves the
+    # wheel in the torque direction at >60 deg/s through the 35-degree threshold.
+    result = None
+    for angle in (20.0, 25.0, 30.0, 35.0, 40.0):
+      result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_pressed=True,
+                                               steering_angle_deg=angle, steering_torque=2.0), actuators)
+    self.assertEqual(controller.human_turn_detector.state, ManualTurnState.YIELDED)
+    self.assertEqual(result.mode, 0)
+    self.assertEqual(result.path_angle, 0.0)
+    self.assertTrue(result.human_turn_active)
+    self.assertEqual(controller.path_angle_last, 0.0)
+    self.assertTrue(CC.latActive, "yield must not clear the logical AOL request")
+
+    # Release alone is insufficient while steering is still moving.
+    for angle in (35.0, 30.0, 25.0, 20.0):
+      result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_angle_deg=angle), actuators)
+      self.assertEqual(result.mode, 0)
+
+    # Once the rolling rate is settled for 0.20 s and curvature is compatible,
+    # the first active command resumes from zero through the existing ROC cap.
+    result = None
+    for _ in range(8):
+      result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_angle_deg=20.0), actuators)
+      if result.mode == 1:
+        break
+    self.assertEqual(controller.human_turn_detector.state, ManualTurnState.REACQUIRE)
+    self.assertEqual(result.mode, 1)
+    self.assertTrue(result.human_turn_active)
+    self.assertLessEqual(abs(result.path_angle), 0.055)
+
+    result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_angle_deg=20.0), actuators)
+    self.assertEqual(controller.human_turn_detector.state, ManualTurnState.TRACKING)
+    self.assertEqual(result.mode, 1)
+
+  def test_manual_turn_rule_rejects_clean_curve_and_lane_change_profiles(self):
+    CC = SimpleNamespace(latActive=True)
+    actuators = SimpleNamespace(curvature=0.002)
+
+    # Clean high-speed curve: modest steering motion despite driver contact.
+    curve = FlashPilotAngleController()
+    for angle in (40.0, 40.3, 40.6, 40.9, 41.2, 41.5, 41.8, 42.1):
+      result = curve.update(CC, _make_cs(v_ego=34.0, yaw_rate=-0.068, steering_pressed=True,
+                                         steering_angle_deg=angle, steering_torque=2.0), actuators)
+      self.assertEqual(result.mode, 1)
+    self.assertEqual(curve.human_turn_detector.state, ManualTurnState.TRACKING)
+
+    # Lane-change steering can be fast, but lacks sustained driver pressure.
+    lane_change = FlashPilotAngleController()
+    for angle in (0.0, 5.0, 12.0, 20.0, 12.0, 5.0, 0.0):
+      result = lane_change.update(CC, _make_cs(v_ego=30.0, yaw_rate=0.0, steering_angle_deg=angle), actuators)
+      self.assertEqual(result.mode, 1)
+    self.assertEqual(lane_change.human_turn_detector.state, ManualTurnState.TRACKING)
+
+  def test_faults_block_reacquisition_and_lat_inactive_stays_inactive(self):
+    controller = FlashPilotAngleController()
+    CC = SimpleNamespace(latActive=True)
+    actuators = SimpleNamespace(curvature=0.1)
+    for angle in (20.0, 25.0, 30.0, 35.0, 40.0):
+      controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_pressed=True,
+                                     steering_angle_deg=angle, steering_torque=2.0), actuators)
+    for _ in range(12):
+      result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8, steering_angle_deg=40.0,
+                                               steer_fault_temporary=True), actuators)
+    self.assertEqual(controller.human_turn_detector.state, ManualTurnState.YIELDED)
+    self.assertEqual(result.mode, 0)
+
+    CC.latActive = False
+    result = controller.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.8), actuators)
+    self.assertEqual(result.mode, 0)
+    self.assertEqual(controller.human_turn_detector.state, ManualTurnState.TRACKING)
+
+  def test_lightning_enabled_human_turn_sends_inactive_lmc2(self):
+    os.environ['FLASHPILOT_ANGLE_ENABLED'] = '1'
+    cc = _make_controller(CAR.FORD_F_150_LIGHTNING_MK1)
     all_sends = []
-    for _ in range(400):
+    # Controller samples at 20 Hz (one of every five update calls).
+    for i in range(30):
+      sample = i // CarControllerParams.STEER_STEP
+      angle = 20.0 + 5.0 * sample
       with _make_cc_reader(curvature=0.01, lat_active=True) as CC:
-        _, sends = cc.update(CC, _make_cs(v_ego=20.0, steering_pressed=True, steering_angle_deg=50.0), 0)
+        _, sends = cc.update(CC, _make_cs(v_ego=8.0, yaw_rate=-0.08, steering_pressed=True,
+                                          steering_angle_deg=angle, steering_torque=2.0), 0)
         all_sends += sends
 
     lmc2 = _find_msg(all_sends, FORD_LateralMotionControl2)
-    mode, _, raw_path_angle = _decode_lmc2(lmc2)
+    mode, raw_curvature, raw_path_angle = _decode_lmc2(lmc2)
     self.assertEqual(mode, 0, "human turn override must force mode 0")
+    self.assertEqual(raw_curvature, 1000, "curvature must use its inactive sentinel while yielded")
     self.assertEqual(raw_path_angle, 1000, "path_angle must be the inactive sentinel while overridden")
 
 

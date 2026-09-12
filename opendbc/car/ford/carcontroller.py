@@ -115,8 +115,13 @@ class CarController(CarControllerBase):
         self.apply_curvature_last = 0.0
         self._fp_shadow_curvature = fp.shadow_curvature
         counter = (self.frame // CarControllerParams.STEER_STEP) % 0x10
+        # The internal sign convention reflects the asymmetric DBC range. Clamp
+        # after sign conversion, immediately before packing, so an endpoint
+        # overflow can never wrap through the packer's unsigned 11-bit field.
+        wire_path_angle = float(np.clip(-fp.path_angle, flashpilot_angle.FORD_WIRE_PATH_ANGLE_MIN,
+                                        flashpilot_angle.FORD_WIRE_PATH_ANGLE_MAX))
         can_sends.append(fordcan.create_lat_ctl2_msg(
-          self.packer, self.CAN, fp.mode, -fp.path_offset, -fp.path_angle, -self.apply_curvature_last,
+          self.packer, self.CAN, fp.mode, -fp.path_offset, wire_path_angle, -self.apply_curvature_last,
           -fp.curvature_rate, counter, ramp_type=fp.ramp_type, precision_type=fp.precision_type))
       else:
         # Bronco and some other cars consistently overshoot curv requests

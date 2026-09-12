@@ -29,15 +29,21 @@ BluePilot's own carcontroller.py does the same for angle mode (`-lat.path_angle`
 missed (the deviation check found a "divergence" every frame once un-negated) --
 this file's docstring exists specifically so that mistake doesn't get made twice.
 """
-from numpy import clip, interp
+import math
+from collections import deque
+from enum import IntEnum
+
+from numpy import clip, interp, median
 
 from opendbc.car import DT_CTRL
 from opendbc.car.ford.values import CarControllerParams
 
-# DBC LatCtlPath_An_Actl range (rad) -- see opendbc/car/ford/fordcan.py's
-# create_lat_ctl2_msg docstring: "Path angle [-0.5|0.5235] radians"
-FORD_DBC_PATH_ANGLE_MIN = -0.5
-FORD_DBC_PATH_ANGLE_MAX = 0.5235
+# DBC LatCtlPath_An_Actl wire range (rad). The internal controller convention is
+# negated at the CAN boundary, so its representable range is reflected.
+FORD_WIRE_PATH_ANGLE_MIN = -0.5
+FORD_WIRE_PATH_ANGLE_MAX = 0.5235
+FORD_INTERNAL_PATH_ANGLE_MIN = -FORD_WIRE_PATH_ANGLE_MAX
+FORD_INTERNAL_PATH_ANGLE_MAX = -FORD_WIRE_PATH_ANGLE_MIN
 
 # PSCM internal lookahead distance (m) vs speed (m/s). Empirical BluePilot constant
 # (lateral_angle_ext.py's pscm_d_ref_m) -- treat as a starting point needing
@@ -64,10 +70,14 @@ _GAIN_CURVATURE_BP = (0.0007, 0.001)
 
 _STEER_DT = CarControllerParams.STEER_STEP * DT_CTRL  # 20 Hz lateral tick
 
-# Human-turn override thresholds, from opendbc/sunnypilot/car/ford/human_turn.py
-HUMAN_TURN_ANGLE_DEG = 45.0
-HUMAN_TURN_HOLD_S = 1.5
-HUMAN_TURN_HOLD_PRETURNED_S = 3.0
+# Validated AOL manual-turn yield/reacquisition thresholds.
+HUMAN_TURN_ENTRY_WINDOW_S = 0.20
+HUMAN_TURN_TORQUE_NM = 1.5
+HUMAN_TURN_RATE_DEG_S = 60.0
+HUMAN_TURN_ANGLE_DEG = 35.0
+HUMAN_TURN_RELEASE_TORQUE_NM = 1.0
+HUMAN_TURN_SETTLE_RATE_DEG_S = 10.0
+HUMAN_TURN_SETTLE_WINDOW_S = 0.20
 
 # PSCM saturation: rate cap on path_angle magnitude decrease while pinned near the
 # DBC range edge (rad/call = 0.02 * 20 Hz = 0.40 rad/s), from lateral_angle_ext.py's
@@ -119,43 +129,74 @@ def path_angle_curvature_factor(v_ego_ms: float, curvature: float,
   return float(interp(abs(curvature), _GAIN_CURVATURE_BP, (low_gain, high_gain)))
 
 
+class ManualTurnState(IntEnum):
+  TRACKING = 0
+  YIELDED = 1
+  REACQUIRE = 2
+
+
+def curvature_compatible_or_unwinding(requested: float, measured: float, max_error: float) -> bool:
+  if abs(requested - measured) <= max_error:
+    return True
+  if measured > max_error:
+    return 0.0 <= requested < measured
+  if measured < -max_error:
+    return measured < requested <= 0.0
+  return False
+
+
 class HumanTurnDetector:
-  """
-  Shared manual-steering-override detection, ported near-verbatim from
-  opendbc/sunnypilot/car/ford/human_turn.py. Latches `active` once the driver holds
-  real steering pressure AND |wheel angle| > HUMAN_TURN_ANGLE_DEG continuously for
-  HUMAN_TURN_HOLD_S (HUMAN_TURN_HOLD_PRETURNED_S if the wheel was already past the
-  threshold when contact began -- distinguishes an intentional takeover from a
-  mid-curve nudge).
-  """
+  """Validated TRACKING -> YIELDED -> REACQUIRE AOL manual-turn state."""
 
   def __init__(self):
-    self.hold_timer_s = 0.0
-    self.active = False
-    self._pressed_last = False
-    self._press_started_preturned = False
+    self.state = ManualTurnState.TRACKING
+    self._samples = deque(maxlen=round(HUMAN_TURN_ENTRY_WINDOW_S / _STEER_DT) + 1)
+    self._settled_s = 0.0
 
-  def update(self, enabled: bool, steering_pressed: bool, steering_angle_deg: float) -> bool:
-    if steering_pressed and not self._pressed_last:
-      self._press_started_preturned = abs(steering_angle_deg) > HUMAN_TURN_ANGLE_DEG
-    self._pressed_last = steering_pressed
+  def _rolling_rate(self) -> float:
+    if len(self._samples) < 2:
+      return 0.0
+    return (self._samples[-1][0] - self._samples[0][0]) / ((len(self._samples) - 1) * _STEER_DT)
 
-    if not enabled:
-      self.hold_timer_s = 0.0
-    elif steering_pressed and abs(steering_angle_deg) > HUMAN_TURN_ANGLE_DEG:
-      self.hold_timer_s += _STEER_DT
+  def update(self, steering_pressed: bool, steering_angle_deg: float, driver_torque_nm: float,
+             inputs_healthy: bool, curvature_compatible: bool) -> ManualTurnState:
+    self._samples.append((float(steering_angle_deg), float(driver_torque_nm), bool(steering_pressed)))
+    window_ready = (len(self._samples) == self._samples.maxlen and
+                    (len(self._samples) - 1) * _STEER_DT >= HUMAN_TURN_ENTRY_WINDOW_S)
+    rolling_rate = self._rolling_rate()
+
+    if self.state == ManualTurnState.TRACKING:
+      if window_ready:
+        torque_median = float(median([abs(x[1]) for x in self._samples]))
+        signed_torque_median = float(median([x[1] for x in self._samples]))
+        motion_agrees = (self._samples[-1][0] - self._samples[0][0]) * signed_torque_median > 0.0
+        enter = (all(x[2] for x in self._samples) and torque_median >= HUMAN_TURN_TORQUE_NM and
+                 motion_agrees and abs(rolling_rate) >= HUMAN_TURN_RATE_DEG_S and
+                 abs(steering_angle_deg) >= HUMAN_TURN_ANGLE_DEG)
+        if enter:
+          self.state = ManualTurnState.YIELDED
+          self._settled_s = 0.0
+
+    elif self.state == ManualTurnState.YIELDED:
+      released_and_settled = (not steering_pressed and abs(driver_torque_nm) < HUMAN_TURN_RELEASE_TORQUE_NM and
+                              abs(rolling_rate) < HUMAN_TURN_SETTLE_RATE_DEG_S)
+      self._settled_s = self._settled_s + _STEER_DT if released_and_settled else 0.0
+      if (self._settled_s >= HUMAN_TURN_SETTLE_WINDOW_S and inputs_healthy and curvature_compatible):
+        self.state = ManualTurnState.REACQUIRE
+
+    elif steering_pressed:
+      # A renewed grab during the one-frame hand-back yields immediately.
+      self.state = ManualTurnState.YIELDED
+      self._settled_s = 0.0
     else:
-      self.hold_timer_s = 0.0
+      self.state = ManualTurnState.TRACKING
 
-    hold_req = HUMAN_TURN_HOLD_PRETURNED_S if self._press_started_preturned else HUMAN_TURN_HOLD_S
-    self.active = self.hold_timer_s >= hold_req
-    return self.active
+    return self.state
 
   def reset(self) -> None:
-    self.hold_timer_s = 0.0
-    self.active = False
-    self._pressed_last = False
-    self._press_started_preturned = False
+    self.state = ManualTurnState.TRACKING
+    self._samples.clear()
+    self._settled_s = 0.0
 
 
 class FlashPilotAngleResult:
@@ -224,8 +265,18 @@ class FlashPilotAngleController:
       self.reset()
       return FlashPilotAngleResult(mode=0, shadow_curvature=self._current_curvature(CS))
 
-    human_turn_active = self.human_turn_detector.update(True, CS.out.steeringPressed, CS.out.steeringAngleDeg)
-    if human_turn_active:
+    requested_curvature = float(actuators.curvature)
+    current_curvature = self._current_curvature(CS)
+    inputs_healthy = (bool(CS.out.canValid) and not CS.out.canTimeout and not CS.out.vehicleSensorsInvalid and
+                      not CS.out.steerFaultTemporary and not CS.out.steerFaultPermanent and
+                      math.isfinite(requested_curvature) and math.isfinite(current_curvature) and
+                      math.isfinite(float(CS.out.steeringAngleDeg)))
+    curvature_compatible = curvature_compatible_or_unwinding(
+      requested_curvature, current_curvature, CarControllerParams.CURVATURE_ERROR)
+    manual_turn_state = self.human_turn_detector.update(
+      CS.out.steeringPressed, CS.out.steeringAngleDeg, CS.out.steeringTorque,
+      inputs_healthy, curvature_compatible)
+    if manual_turn_state == ManualTurnState.YIELDED:
       # Force lateral fully inactive (mode 0) rather than letting path_angle wind up
       # to a stale command the PSCM has to reconcile on release. Panda-clean by
       # construction: every ford.h check has a legitimate !steer_control_enabled
@@ -234,14 +285,12 @@ class FlashPilotAngleController:
       return FlashPilotAngleResult(mode=0, human_turn_active=True,
                                     shadow_curvature=self._current_curvature(CS))
 
-    requested_curvature = float(actuators.curvature)
     kappa_cmd = requested_curvature
 
     # Added same-direction authority remains inside the normal measured-curvature
     # envelope. Reducing existing curvature may move toward zero faster, but an
     # opposite-sign request stops at zero until it fits the normal envelope. The
     # matched Panda rule enforces the same asymmetric, unwind-only allowance.
-    current_curvature = self._current_curvature(CS)
     if v_ego > 9:
       kappa_cmd = limit_curvature_for_unwind(kappa_cmd, current_curvature, CarControllerParams.CURVATURE_ERROR)
     deviation_limited = abs(kappa_cmd - requested_curvature) > 1e-12
@@ -257,8 +306,8 @@ class FlashPilotAngleController:
     # PSCM saturation clamp: a function of our own tracked path_angle_last only --
     # no PSCM signal is read (LatCtlLim_D_Stat does not fire in angle mode; see
     # docs/flashpilot/FLASHPILOT_PATH_ANGLE_PHASE_A.md item 5).
-    dbc_sat = (self.path_angle_last >= FORD_DBC_PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
-               self.path_angle_last <= FORD_DBC_PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
+    dbc_sat = (self.path_angle_last >= FORD_INTERNAL_PATH_ANGLE_MAX * _DBC_SAT_FRACTION or
+               self.path_angle_last <= FORD_INTERNAL_PATH_ANGLE_MIN * _DBC_SAT_FRACTION)
     path_angle_pre_pscm = path_angle
     if dbc_sat:
       last_mag = abs(self.path_angle_last)
@@ -271,7 +320,7 @@ class FlashPilotAngleController:
     pscm_saturation_limited = abs(path_angle - path_angle_pre_pscm) > 1e-12
 
     path_angle_pre_range = path_angle
-    path_angle = float(clip(path_angle, FORD_DBC_PATH_ANGLE_MIN, FORD_DBC_PATH_ANGLE_MAX))
+    path_angle = float(clip(path_angle, FORD_INTERNAL_PATH_ANGLE_MIN, FORD_INTERNAL_PATH_ANGLE_MAX))
     range_limited = abs(path_angle - path_angle_pre_range) > 1e-12
 
     soft_roc = float(interp(v_ego, _SOFT_ROC_BP, _SOFT_ROC_V))
@@ -291,7 +340,8 @@ class FlashPilotAngleController:
     return FlashPilotAngleResult(
       mode=1, path_angle=path_angle, path_offset=0.0, curvature_rate=0.0,
       ramp_type=2, precision_type=1, shadow_curvature=shadow_curvature,
-      human_turn_active=False, saturated=dbc_sat, rate_limited=rate_limited,
+      human_turn_active=manual_turn_state == ManualTurnState.REACQUIRE,
+      saturated=dbc_sat, rate_limited=rate_limited,
       requested_curvature=requested_curvature, deviation_limited_curvature=kappa_cmd,
       calculated_path_angle=calculated_path_angle, deviation_limited=deviation_limited,
       pscm_saturation_limited=pscm_saturation_limited, range_limited=range_limited,
