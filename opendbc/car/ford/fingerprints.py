@@ -146,6 +146,7 @@ FW_VERSIONS = {
     ],
     (Ecu.fwdRadar, 0x764, None): [
       b'ML3T-14D049-AL\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
+      b'RB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
     ],
     (Ecu.eps, 0x730, None): [
       b'RL38-14D003-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',
