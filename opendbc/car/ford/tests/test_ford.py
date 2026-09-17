@@ -7,6 +7,7 @@ from opendbc.car.structs import CarParams
 from opendbc.car.fw_versions import build_fw_dict
 from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
+from opendbc.car.ford.interface import CarInterface
 from opendbc.testing import parameterized
 
 Ecu = CarParams.Ecu
@@ -38,6 +39,23 @@ ECU_PART_NUMBER = {
     b"14H102",  # Ford Q4
   ],
 }
+
+
+class TestFordLongitudinalActuatorDelay(unittest.TestCase):
+  def test_lightning_actuator_delay(self):
+    # Physically validated on real F-150 Lightning hardware (FlashPilot fork); do not change
+    # without new physical validation.
+    CP = CarInterface.get_non_essential_params(CAR.FORD_F_150_LIGHTNING_MK1)
+    assert CP.longitudinalActuatorDelay == 0.25
+
+  def test_other_ford_platforms_unaffected(self):
+    default_delay = CarInterface.get_non_essential_params(CAR.FORD_F_150_MK14).longitudinalActuatorDelay
+    for platform in CAR:
+      if platform == CAR.FORD_F_150_LIGHTNING_MK1:
+        continue
+      CP = CarInterface.get_non_essential_params(platform)
+      assert CP.longitudinalActuatorDelay == default_delay, \
+        f"{platform} actuator delay changed unexpectedly"
 
 
 class TestFordFW(unittest.TestCase):
