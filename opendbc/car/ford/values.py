@@ -47,6 +47,11 @@ class FordSafetyFlags(IntFlag):
 class FordFlags(IntFlag):
   # Static flags
   CANFD = 1
+  # Runtime-only, Lightning only: request the IPMA_Data cluster's hands-free-style
+  # display while actively steering. Enum member retained (never set) because
+  # carcontroller.py's ported lateral code checks it in a bitwise flag test;
+  # the feature that would set it is explicitly out of V2-4 scope.
+  HANDS_FREE_CLUSTER = 8
 
 
 class RADAR:

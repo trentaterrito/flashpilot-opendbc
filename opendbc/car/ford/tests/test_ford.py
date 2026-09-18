@@ -1,8 +1,10 @@
 import random
 import unittest
 
+from opendbc.car import Bus
 from opendbc.car.structs import CarParams
-from opendbc.car.fw_versions import build_fw_dict
+from opendbc.car.ford.carstate import CarState
+from opendbc.car.fw_versions import build_fw_dict, match_fw_to_car
 from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
 from opendbc.car.ford.interface import CarInterface
@@ -57,6 +59,13 @@ ECU_PART_NUMBER = {
 
 
 class TestFordFW(unittest.TestCase):
+  def test_lightning_ipma_bursty_rate_is_explicit(self):
+    cp = CarParams(carFingerprint=CAR.FORD_F_150_LIGHTNING_MK1)
+    parsers = CarState.get_can_parsers(cp)
+    ipma = parsers[Bus.cam].message_states[0x3D8]
+    assert ipma.frequency == 1
+    assert ipma.timeout_threshold == 10_000_000_000
+
   def test_fw_query_config(self):
     for (ecu, addr, subaddr) in FW_QUERY_CONFIG.extra_ecus:
       assert ecu in ECU_ADDRESSES, "Unknown ECU"
@@ -153,3 +162,29 @@ class TestFordFW(unittest.TestCase):
     live_fw[(0x760, None)] = {b"M1MC-2D053-XX\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"}
     candidates = FW_QUERY_CONFIG.match_fw_to_car_fuzzy(live_fw, '', {expected_fingerprint: offline_fw})
     assert len(candidates) == 0, "Should not match new model year hint"
+
+  def test_my2024_lightning_exact_match(self):
+    """
+    Regression anchor (FlashPilot project) for a real 2024 F-150 Lightning capture.
+    ABS/EPS/camera already matched firmware on file; the radar firmware
+    (RB5T-14D049-AB) was new for this model year and is why this needs its own
+    case: before it was added to FW_VERSIONS, this exact combination matched
+    nothing at all via match_fw_to_car -- not exact, not fuzzy (Ford's fuzzy
+    matcher also requires the radar's platform code to be recognized) -- and
+    would have fallen through to MOCK. Uses match_fw_to_car (the same
+    brand-agnostic dispatcher get_car() calls), not FW_QUERY_CONFIG's
+    Ford-specific matcher directly, so this exercises the real match path.
+    """
+    car_fw = [
+      CarParams.CarFw(brand="ford", ecu=Ecu.abs, address=0x760, subAddress=0,
+                       fwVersion=b"RL38-2D053-BD\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+      CarParams.CarFw(brand="ford", ecu=Ecu.eps, address=0x730, subAddress=0,
+                       fwVersion=b"RL38-14D003-AA\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+      CarParams.CarFw(brand="ford", ecu=Ecu.fwdCamera, address=0x706, subAddress=0,
+                       fwVersion=b"RJ6T-14H102-BBC\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+      CarParams.CarFw(brand="ford", ecu=Ecu.fwdRadar, address=0x764, subAddress=0,
+                       fwVersion=b"RB5T-14D049-AB\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"),
+    ]
+    exact_match, matches = match_fw_to_car(car_fw, "")
+    assert exact_match, "Real 2024 Lightning capture should resolve via exact match"
+    assert matches == {CAR.FORD_F_150_LIGHTNING_MK1}

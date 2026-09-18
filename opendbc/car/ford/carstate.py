@@ -2,12 +2,18 @@ from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, create_button_events, structs
 from opendbc.car.common.conversions import Conversions as CV
 from opendbc.car.ford.fordcan import CanBus
-from opendbc.car.ford.values import DBC, CarControllerParams, FordFlags
+from opendbc.car.ford.values import CAR, DBC, CarControllerParams, FordFlags
 from opendbc.car.interfaces import CarStateBase
 
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
+BSM_FRESHNESS_NS = 400_000_000
+
+
+def read_bsm_state(cp, message: str, signal: str) -> tuple[bool, bool]:
+  value = cp.vl[message][signal]
+  return value != 0, cp.message_fresh(message, BSM_FRESHNESS_NS)
 
 
 class CarState(CarStateBase):
@@ -98,8 +104,8 @@ class CarState(CarStateBase):
     # blindspot sensors
     if self.CP.enableBsm:
       cp_bsm = cp_cam if self.CP.flags & FordFlags.CANFD else cp
-      ret.leftBlindspot = cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
-      ret.rightBlindspot = cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
+      ret.leftBlindspot, ret.leftBlindspotValid = read_bsm_state(cp_bsm, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+      ret.rightBlindspot, ret.rightBlindspotValid = read_bsm_state(cp_bsm, "Side_Detect_R_Stat", "SodDetctRight_D_Stat")
 
     # Stock steering buttons so that we can passthru blinkers etc.
     self.buttons_stock_values = cp.vl["Steering_Data_FD1"]
@@ -116,7 +122,12 @@ class CarState(CarStateBase):
 
   @staticmethod
   def get_can_parsers(CP):
+    cam_messages = [("IPMA_Data", 1)] if CP.carFingerprint == CAR.FORD_F_150_LIGHTNING_MK1 else []
     return {
       Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).main),
-      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
+      # IPMA_Data arrives in bursts on the F-150 Lightning, with observed gaps
+      # near one second. Do not dynamically learn the intra-burst rate and then
+      # invalidate the entire car interface between bursts. It is consumed only
+      # as the stock LKAS UI passthrough payload, which we transmit at 1 Hz.
+      Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], cam_messages, CanBus(CP).camera),
     }

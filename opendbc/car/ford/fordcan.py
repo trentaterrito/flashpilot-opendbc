@@ -31,16 +31,39 @@ def calculate_lat_ctl2_checksum(mode: int, counter: int, dat: bytearray) -> int:
   return 0xFF - (checksum & 0xFF)
 
 
-def create_lka_msg(packer, CAN: CanBus):
+_FP_SHADOW_CURVATURE_SCALE = 1e-6  # 1/meter per raw unit -- must match ford.h's decode exactly
+
+
+def create_lka_msg(packer, CAN: CanBus, angle_mode_engaged: bool = False, shadow_curvature: float = 0.0):
   """
   Creates an empty CAN message for the Ford LKA Command.
 
   This command can apply "Lane Keeping Aid" maneuvers, which are subject to the PSCM lockout.
 
+  FlashPilot extension (additive, default args reproduce upstream's exact empty-message
+  output): packs angle_mode_engaged + shadow_curvature into bits with no DBC signal mapped
+  to them, confirmed unused (always 0) on real F-150 dashcam routes -- see
+  BluePilotDev/bluepilot@501a7c0's opendbc/sunnypilot/car/ford/fordcan_ext.py::create_lka_msg,
+  which this mirrors. Consumed synchronously by ford.h's tx_hook (Phase C) for the Lightning
+  path-angle safety check; ignored for every other car (defaults produce all-zero bytes,
+  same as calling with no extra args).
+
+  Byte layout (bits not covered by any Lane_Assist_Data1 DBC signal):
+    byte 4 bit 0:     angle_mode_engaged
+    byte 5-6:         shadow_curvature (int16, scale 1e-6 1/m)
+
   Frequency is 33Hz.
   """
-
-  return packer.make_can_msg("Lane_Assist_Data1", CAN.main, {})
+  addr, dat, bus = packer.make_can_msg("Lane_Assist_Data1", CAN.main, {})
+  if angle_mode_engaged or shadow_curvature != 0.0:
+    dat = bytearray(dat)
+    raw = int(round(shadow_curvature / _FP_SHADOW_CURVATURE_SCALE))
+    raw = max(-32768, min(32767, raw)) & 0xFFFF
+    dat[4] |= 1 if angle_mode_engaged else 0
+    dat[5] = (raw >> 8) & 0xFF
+    dat[6] = raw & 0xFF
+    dat = bytes(dat)
+  return addr, dat, bus
 
 
 def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float, path_angle: float, curvature: float,
@@ -84,12 +107,20 @@ def create_lat_ctl_msg(packer, CAN: CanBus, lat_active: bool, path_offset: float
 
 
 def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path_angle: float, curvature: float,
-                        curvature_rate: float, counter: int):
+                        curvature_rate: float, counter: int, ramp_type: int = 0, precision_type: int = 1):
   """
   Create a CAN message for the new Ford Lane Centering command.
 
   This message is used on the CAN FD platform and replaces the old LateralMotionControl message. It is similar but has
   additional signals for a counter and checksum.
+
+  FlashPilot extension (additive, keyword-only, defaults reproduce upstream's exact
+  hardcoded values): ramp_type/precision_type let a caller (currently only the
+  Lightning path-angle path) use something other than Slow/Precise. Every existing
+  positional call site is unaffected. Mirrors BluePilotDev/bluepilot@501a7c0's
+  opendbc/sunnypilot/car/ford/fordcan_ext.py::create_lat_ctl2_msg, but appended at the
+  end rather than inserted after `mode` -- BluePilot has no separate stock call site to
+  keep byte-compatible, we do.
 
   Frequency is 20Hz.
   """
@@ -97,8 +128,8 @@ def create_lat_ctl2_msg(packer, CAN: CanBus, mode: int, path_offset: float, path
   values = {
     "LatCtl_D2_Rq": mode,                       # Mode: 0=None, 1=PathFollowingLimitedMode, 2=PathFollowingExtendedMode,
                                                 #       3=SafeRampOut, 4-7=NotUsed [0|7]
-    "LatCtlRampType_D_Rq": 0,                   # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
-    "LatCtlPrecision_D_Rq": 1,                  # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
+    "LatCtlRampType_D_Rq": ramp_type,           # 0=Slow, 1=Medium, 2=Fast, 3=Immediate [0|3]
+    "LatCtlPrecision_D_Rq": precision_type,     # 0=Comfortable, 1=Precise, 2/3=NotUsed [0|3]
     "LatCtlPathOffst_L_Actl": path_offset,      # [-5.12|5.11] meter
     "LatCtlPath_An_Actl": path_angle,           # [-0.5|0.5235] radians
     "LatCtlCurv_No_Actl": curvature,            # [-0.02|0.02094] 1/meter
@@ -144,7 +175,7 @@ def create_acc_msg(packer, CAN: CanBus, long_active: bool, gas: float, accel: fl
 
 
 def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw_alert: bool, standstill: bool,
-                      show_distance_bars: bool, hud_control, stock_values: dict):
+                      show_distance_bars: bool, hud_control, stock_values: dict, hands_free_cluster: bool = False):
   """
   Creates a CAN message for the Ford IPC adaptive cruise, forward collision warning and traffic jam
   assist status.
@@ -160,6 +191,8 @@ def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw
       status = 3  # ActiveInterventionLeft
     elif hud_control.rightLaneDepart:
       status = 4  # ActiveInterventionRight
+    elif hands_free_cluster:
+      status = 7  # BluePilot/StarPilot CAN-FD hands-free cluster graphic (not a warning)
     else:
       status = 2  # Active
   elif main_on:
@@ -223,7 +256,7 @@ def create_acc_ui_msg(packer, CAN: CanBus, CP, main_on: bool, enabled: bool, fcw
 
 
 def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_alert: bool, hud_control,
-                       stock_values: dict):
+                       stock_values: dict, hands_free_cluster: bool = False):
   """
   Creates a CAN message for the Ford IPC IPMA/LKAS status.
 
@@ -232,6 +265,11 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
   Stock functionality is maintained by passing through unmodified signals.
 
   Frequency is 1Hz.
+
+  FlashPilot: retain the hands_free_cluster API/Param wiring, but do not use
+  LaHandsOff_D_Dsply for hands-free presentation. Level2 is a take-the-wheel
+  warning WITH chime, not BlueCruise status. A replacement display signal is
+  pending vehicle-specific validation. Genuine steering alerts remain intact.
   """
 
   # LaActvStats_D_Dsply
@@ -264,7 +302,10 @@ def create_lkas_ui_msg(packer, CAN: CanBus, main_on: bool, enabled: bool, steer_
     else:
       lines = 30  # LA_Off
 
-  hands_on_wheel_dsply = 1 if steer_alert else 0
+  if steer_alert:
+    hands_on_wheel_dsply = 1                                # unchanged: steering alert always takes precedence
+  else:
+    hands_on_wheel_dsply = 0                                # unchanged
 
   values = {s: stock_values[s] for s in [
     "FeatConfigIpmaActl",
