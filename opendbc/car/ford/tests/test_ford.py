@@ -1,11 +1,12 @@
 import random
 import unittest
 
+from opendbc.can import CANPacker, CANParser
 from opendbc.car import Bus
 from opendbc.car.structs import CarParams
-from opendbc.car.ford.carstate import CarState
+from opendbc.car.ford.carstate import CarState, read_bsm_state, BSM_FRESHNESS_NS
 from opendbc.car.fw_versions import build_fw_dict, match_fw_to_car
-from opendbc.car.ford.values import CAR, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
+from opendbc.car.ford.values import CAR, DBC, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
 from opendbc.car.ford.fingerprints import FW_VERSIONS
 from opendbc.car.ford.interface import CarInterface
 from opendbc.testing import fuzzy_test, parameterized
@@ -188,3 +189,41 @@ class TestFordFW(unittest.TestCase):
     exact_match, matches = match_fw_to_car(car_fw, "")
     assert exact_match, "Real 2024 Lightning capture should resolve via exact match"
     assert matches == {CAR.FORD_F_150_LIGHTNING_MK1}
+
+
+class TestFordReadBsmState(unittest.TestCase):
+  """
+  Regression test for the V2-4 card crash: CANParser has no message_fresh()
+  method (only message_states, keyed by address). read_bsm_state() must derive
+  freshness from the message's own last-seen timestamp against BSM_FRESHNESS_NS.
+  """
+
+  def setUp(self):
+    dbc_name = DBC[CAR.FORD_F_150_LIGHTNING_MK1][Bus.pt]
+    self.packer = CANPacker(dbc_name)
+    self.parser = CANParser(dbc_name, [("Side_Detect_L_Stat", 0)], 0)
+
+  def _send(self, t_nanos: int, active: bool):
+    msg = self.packer.make_can_msg("Side_Detect_L_Stat", 0, {"SodDetctLeft_D_Stat": 1 if active else 0})
+    self.parser.update([(t_nanos, [msg])])
+
+  def test_fresh_bsm_message_is_valid(self):
+    self._send(0, active=True)
+    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+    assert active
+    assert valid
+
+  def test_stale_bsm_message_is_invalid(self):
+    self._send(0, active=True)
+    # Advance the parser's clock well past BSM_FRESHNESS_NS with no new frame
+    # for this message (empty frame list), mirroring a real dropped-message gap.
+    self.parser.update([(BSM_FRESHNESS_NS * 3, [])])
+    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+    assert active, "Active state must still reflect the last received signal value"
+    assert not valid, "A message this old must not be reported as fresh"
+
+  def test_active_state_reflects_current_signal_regardless_of_freshness(self):
+    self._send(0, active=False)
+    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+    assert not active
+    assert valid

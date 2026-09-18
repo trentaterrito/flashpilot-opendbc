@@ -13,7 +13,13 @@ BSM_FRESHNESS_NS = 400_000_000
 
 def read_bsm_state(cp, message: str, signal: str) -> tuple[bool, bool]:
   value = cp.vl[message][signal]
-  return value != 0, cp.message_fresh(message, BSM_FRESHNESS_NS)
+  # CANParser has no message_fresh() helper; message_states is keyed by address
+  # (not name) and freshness must be derived from the message's own last-seen
+  # timestamp against the parser's own last-processed time, exactly like
+  # CANParser.can_valid/bus_timeout already do internally for every message.
+  msg_state = cp.message_states[cp.dbc.name_to_msg[message].address]
+  fresh = bool(msg_state.timestamps) and (cp._last_update_nanos - msg_state.timestamps[-1]) <= BSM_FRESHNESS_NS
+  return value != 0, fresh
 
 
 class CarState(CarStateBase):
