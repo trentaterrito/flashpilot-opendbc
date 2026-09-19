@@ -193,9 +193,13 @@ class TestFordFW(unittest.TestCase):
 
 class TestFordReadBsmState(unittest.TestCase):
   """
-  Regression test for the V2-4 card crash: CANParser has no message_fresh()
-  method (only message_states, keyed by address). read_bsm_state() must derive
-  freshness from the message's own last-seen timestamp against BSM_FRESHNESS_NS.
+  Regression test for the V2-4 card crash chain:
+  1. CANParser has no message_fresh() method (only message_states, keyed by
+     address) -- freshness must be derived from the message's own last-seen
+     timestamp against BSM_FRESHNESS_NS.
+  2. leftBlindspotValid/rightBlindspotValid are not fields on this schema's
+     CarState -- read_bsm_state() returns a single bool, folding freshness
+     into the active state instead of exposing it as a second signal.
   """
 
   def setUp(self):
@@ -207,23 +211,18 @@ class TestFordReadBsmState(unittest.TestCase):
     msg = self.packer.make_can_msg("Side_Detect_L_Stat", 0, {"SodDetctLeft_D_Stat": 1 if active else 0})
     self.parser.update([(t_nanos, [msg])])
 
-  def test_fresh_bsm_message_is_valid(self):
+  def test_fresh_active_bsm_message_reports_active(self):
     self._send(0, active=True)
-    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
-    assert active
-    assert valid
+    assert read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
 
-  def test_stale_bsm_message_is_invalid(self):
+  def test_stale_bsm_message_reports_inactive_even_if_last_value_was_active(self):
     self._send(0, active=True)
     # Advance the parser's clock well past BSM_FRESHNESS_NS with no new frame
     # for this message (empty frame list), mirroring a real dropped-message gap.
     self.parser.update([(BSM_FRESHNESS_NS * 3, [])])
-    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
-    assert active, "Active state must still reflect the last received signal value"
-    assert not valid, "A message this old must not be reported as fresh"
+    assert not read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat"), \
+      "A message this old must not be reported as active, regardless of its last value"
 
-  def test_active_state_reflects_current_signal_regardless_of_freshness(self):
+  def test_fresh_inactive_bsm_message_reports_inactive(self):
     self._send(0, active=False)
-    active, valid = read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
-    assert not active
-    assert valid
+    assert not read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
