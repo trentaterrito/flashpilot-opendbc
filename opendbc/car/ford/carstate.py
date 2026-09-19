@@ -8,25 +8,6 @@ from opendbc.car.interfaces import CarStateBase
 ButtonType = structs.CarState.ButtonEvent.Type
 GearShifter = structs.CarState.GearShifter
 TransmissionType = structs.CarParams.TransmissionType
-BSM_FRESHNESS_NS = 400_000_000
-
-
-def read_bsm_state(cp, message: str, signal: str) -> bool:
-  # leftBlindspotValid/rightBlindspotValid are not fields on this schema's CarState
-  # (no consumer anywhere in this tree needs them separately -- V1's only consumers,
-  # modeld.py's nudgeless-lane-change DesireHelper.update() call and a MICI-only UI
-  # indicator file, were never ported here, and this baseline's DesireHelper.update()
-  # doesn't even accept a blindspot-validity argument). Fold the freshness check
-  # into the single reported active state instead: a stale BSM reading is treated
-  # as inactive rather than exposed as a separate signal.
-  #
-  # CANParser has no message_fresh() helper; message_states is keyed by address
-  # (not name) and freshness must be derived from the message's own last-seen
-  # timestamp against the parser's own last-processed time, exactly like
-  # CANParser.can_valid/bus_timeout already do internally for every message.
-  msg_state = cp.message_states[cp.dbc.name_to_msg[message].address]
-  fresh = bool(msg_state.timestamps) and (cp._last_update_nanos - msg_state.timestamps[-1]) <= BSM_FRESHNESS_NS
-  return (cp.vl[message][signal] != 0) and fresh
 
 
 class CarState(CarStateBase):
@@ -117,8 +98,8 @@ class CarState(CarStateBase):
     # blindspot sensors
     if self.CP.enableBsm:
       cp_bsm = cp_cam if self.CP.flags & FordFlags.CANFD else cp
-      ret.leftBlindspot = read_bsm_state(cp_bsm, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
-      ret.rightBlindspot = read_bsm_state(cp_bsm, "Side_Detect_R_Stat", "SodDetctRight_D_Stat")
+      ret.leftBlindspot = cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
+      ret.rightBlindspot = cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
 
     # Stock steering buttons so that we can passthru blinkers etc.
     self.buttons_stock_values = cp.vl["Steering_Data_FD1"]

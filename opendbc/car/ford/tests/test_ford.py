@@ -1,12 +1,12 @@
 import random
 import unittest
 
-from opendbc.can import CANPacker, CANParser
+from opendbc.can import CANPacker
 from opendbc.car import Bus
 from opendbc.car.structs import CarParams
-from opendbc.car.ford.carstate import CarState, read_bsm_state, BSM_FRESHNESS_NS
+from opendbc.car.ford.carstate import CarState
 from opendbc.car.fw_versions import build_fw_dict, match_fw_to_car
-from opendbc.car.ford.values import CAR, DBC, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes
+from opendbc.car.ford.values import CAR, DBC, FW_QUERY_CONFIG, FW_PATTERN, get_platform_codes, FordFlags
 from opendbc.car.ford.fingerprints import FW_VERSIONS
 from opendbc.car.ford.interface import CarInterface
 from opendbc.testing import fuzzy_test, parameterized
@@ -191,38 +191,89 @@ class TestFordFW(unittest.TestCase):
     assert matches == {CAR.FORD_F_150_LIGHTNING_MK1}
 
 
-class TestFordReadBsmState(unittest.TestCase):
+class TestFordLightningBsm(unittest.TestCase):
   """
-  Regression test for the V2-4 card crash chain:
-  1. CANParser has no message_fresh() method (only message_states, keyed by
-     address) -- freshness must be derived from the message's own last-seen
-     timestamp against BSM_FRESHNESS_NS.
-  2. leftBlindspotValid/rightBlindspotValid are not fields on this schema's
-     CarState -- read_bsm_state() returns a single bool, folding freshness
-     into the active state instead of exposing it as a second signal.
+  Regression test for a 3-crash chain in the V1 BSM port (message_fresh() does
+  not exist on this baseline's CANParser; leftBlindspotValid/rightBlindspotValid
+  are not CarState fields; cp.message_states[934] raised KeyError because
+  Side_Detect_L_Stat/R_Stat are never in either parser's constructor message
+  list for the real Lightning config -- only reachable via cp.vl's lazy
+  auto-registration, which plain dict indexing into message_states bypasses).
+
+  No V2-4 consumer of BSM validity/freshness exists (modeld.py's
+  DesireHelper.update() call and the MICI-only UI indicator that read
+  leftBlindspotValid/rightBlindspotValid in V1 were never ported), so this
+  reverts to pristine upstream's plain two-line behavior instead of inventing
+  another freshness mechanism. This test uses the REAL, unmodified
+  CarState.get_can_parsers() factory -- the actual production parser
+  configuration -- not a synthetic parser pre-registered with the BSM message.
   """
 
   def setUp(self):
+    self.CP = CarParams(carFingerprint=CAR.FORD_F_150_LIGHTNING_MK1, enableBsm=True,
+                         flags=int(FordFlags.CANFD))
+    self.parsers = CarState.get_can_parsers(self.CP)
+    self.cp_bsm = self.parsers[Bus.cam]  # CANFD Lightning: cp_bsm = cp_cam
     dbc_name = DBC[CAR.FORD_F_150_LIGHTNING_MK1][Bus.pt]
     self.packer = CANPacker(dbc_name)
-    self.parser = CANParser(dbc_name, [("Side_Detect_L_Stat", 0)], 0)
 
-  def _send(self, t_nanos: int, active: bool):
-    msg = self.packer.make_can_msg("Side_Detect_L_Stat", 0, {"SodDetctLeft_D_Stat": 1 if active else 0})
-    self.parser.update([(t_nanos, [msg])])
+  def _send(self, t_nanos: int, left: bool | None = None, right: bool | None = None):
+    bus = self.cp_bsm.bus
+    msgs = []
+    if left is not None:
+      msgs.append(self.packer.make_can_msg("Side_Detect_L_Stat", bus, {"SodDetctLeft_D_Stat": 1 if left else 0}))
+    if right is not None:
+      msgs.append(self.packer.make_can_msg("Side_Detect_R_Stat", bus, {"SodDetctRight_D_Stat": 1 if right else 0}))
+    self.cp_bsm.update([(t_nanos, msgs)])
 
-  def test_fresh_active_bsm_message_reports_active(self):
-    self._send(0, active=True)
-    assert read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+  def _read(self) -> tuple[bool, bool]:
+    left = self.cp_bsm.vl["Side_Detect_L_Stat"]["SodDetctLeft_D_Stat"] != 0
+    right = self.cp_bsm.vl["Side_Detect_R_Stat"]["SodDetctRight_D_Stat"] != 0
+    return left, right
 
-  def test_stale_bsm_message_reports_inactive_even_if_last_value_was_active(self):
-    self._send(0, active=True)
-    # Advance the parser's clock well past BSM_FRESHNESS_NS with no new frame
-    # for this message (empty frame list), mirroring a real dropped-message gap.
-    self.parser.update([(BSM_FRESHNESS_NS * 3, [])])
-    assert not read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat"), \
-      "A message this old must not be reported as active, regardless of its last value"
+  def test_parser_construction_does_not_preregister_bsm(self):
+    # Confirms the real bug precondition: BSM is not in the constructor list,
+    # only IPMA_Data is, for the real Lightning cam-bus parser.
+    assert 934 not in self.cp_bsm.message_states
+    assert 935 not in self.cp_bsm.message_states
 
-  def test_fresh_inactive_bsm_message_reports_inactive(self):
-    self._send(0, active=False)
-    assert not read_bsm_state(self.parser, "Side_Detect_L_Stat", "SodDetctLeft_D_Stat")
+  def test_no_bsm_frame_yet_reads_inactive_without_keyerror(self):
+    left, right = self._read()
+    assert left is False
+    assert right is False
+
+  def test_inactive_bsm(self):
+    self._send(0, left=False, right=False)
+    left, right = self._read()
+    assert left is False
+    assert right is False
+
+  def test_active_left_bsm(self):
+    # Side_Detect_L_Stat/R_Stat aren't in the constructor message list (only
+    # IPMA_Data is), so CANParser.update() silently drops the very first raw
+    # frame for an address it hasn't seen before -- cp.vl's lazy
+    # auto-registration (VLDict.__getitem__ -> _add_message) only runs on
+    # access, one step behind update()'s own address lookup. True of pristine
+    # upstream too, not something this port changed: production reads
+    # cp.vl[...] every real cycle, so it self-heals from the second frame
+    # onward. Warm up once here to test steady-state behavior, not that
+    # one-cycle startup transient (already covered by the "no frame yet" case).
+    self._read()
+    self._send(0, left=True, right=False)
+    left, right = self._read()
+    assert left is True
+    assert right is False
+
+  def test_active_right_bsm(self):
+    self._read()  # see test_active_left_bsm
+    self._send(0, left=False, right=True)
+    left, right = self._read()
+    assert left is False
+    assert right is True
+
+  def test_repeated_update_no_keyerror(self):
+    for i in range(5):
+      self._send(i * 20_000_000, left=bool(i % 2), right=bool((i + 1) % 2))
+    left, right = self._read()
+    assert isinstance(left, bool)
+    assert isinstance(right, bool)
