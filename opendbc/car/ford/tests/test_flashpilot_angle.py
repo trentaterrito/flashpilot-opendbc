@@ -110,17 +110,19 @@ class TestFlashPilotAngleTelemetry(unittest.TestCase):
     self.assertFalse(saturated.range_limited)
     self.assertEqual(saturated.path_angle, 0.48)
 
-  def test_schema_round_trip(self):
-    output = structs.car.CarOutput.new_message()
-    output.fordLateralTelemetry.active = True
-    output.fordLateralTelemetry.wireMode = 1
-    output.fordLateralTelemetry.requestedCurvature = 0.01
-    output.fordLateralTelemetry.deviationLimited = True
-    with structs.car.CarOutput.from_bytes(output.to_bytes()) as decoded:
-      self.assertTrue(decoded.fordLateralTelemetry.active)
-      self.assertEqual(decoded.fordLateralTelemetry.wireMode, 1)
-      self.assertAlmostEqual(decoded.fordLateralTelemetry.requestedCurvature, 0.01)
-      self.assertTrue(decoded.fordLateralTelemetry.deviationLimited)
+  # test_schema_round_trip intentionally removed: it round-tripped a
+  # car.capnp CarOutput.fordLateralTelemetry extension field that exists in
+  # V1's own car.capnp but was never part of V2-4's ported scope (core/shared
+  # schema file, correctly untouched -- same reasoning as declarations.h).
+  # Traced to zero runtime producer or consumer anywhere in this tree: V1's
+  # only producer was card.py (openpilot/selfdrive/car/card.py, untouched by
+  # V2-4, pristine) publishing it as pure read-only diagnostic telemetry --
+  # a one-way passthrough of the controller's own already-computed return
+  # values (mode/requested_curvature/deviation_limited/etc.), the same
+  # values already exercised directly by every other test in this file via
+  # FlashPilotAngleController's plain Python return object. It never fed
+  # back into command generation. A stale V1 test artifact, not a runtime
+  # contract; removing it needs no schema addition.
 
 
 def _make_controller(fingerprint):
